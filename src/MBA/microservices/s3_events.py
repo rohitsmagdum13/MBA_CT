@@ -16,6 +16,7 @@ Module Output:
 """
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -70,22 +71,28 @@ class S3EventHandler:
             - Initializes CSV ingestor
             - Logs initialization
         """
-        self.csv_prefix = csv_prefix or settings.get_prefix("csv")
+        self.csv_prefix = csv_prefix or os.environ.get('CSV_PREFIX', 'mba/csv/')
         
-        # Initialize S3 client
-        session_kwargs = {}
-        if settings.aws_profile:
-            session_kwargs["profile_name"] = settings.aws_profile
-        elif settings.aws_access_key_id and settings.aws_secret_access_key:
-            session_kwargs.update({
-                "aws_access_key_id": settings.aws_access_key_id,
-                "aws_secret_access_key": settings.aws_secret_access_key
-            })
+        # CRITICAL FIX: Detect if running in Lambda
+        is_lambda = 'AWS_EXECUTION_ENV' in os.environ or 'AWS_LAMBDA_FUNCTION_NAME' in os.environ
         
-        session = boto3.Session(
-            region_name=settings.aws_default_region,
-            **session_kwargs
-        )
+        if is_lambda:
+            # In Lambda: NEVER use explicit credentials - use execution role automatically
+            logger.info("Running in AWS Lambda - using execution role")
+            session = boto3.Session(region_name=os.environ.get('AWS_REGION', 'us-east-1'))
+        else:
+            # Running locally: use credentials from settings if available
+            logger.info("Running locally - using credentials from settings")
+            session_kwargs = {'region_name': settings.aws_default_region}
+            
+            if settings.aws_profile:
+                session_kwargs["profile_name"] = settings.aws_profile
+            elif settings.aws_access_key_id and settings.aws_secret_access_key:
+                session_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+                session_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+            
+            session = boto3.Session(**session_kwargs)
+        
         self.s3_client = session.client("s3")
         
         # Initialize ingestion components
@@ -352,7 +359,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         - Timeout: 5 minutes (adjust based on CSV sizes)
         - Memory: 512 MB (adjust based on CSV sizes)
     """
-    logger.info(f"Lambda invoked: request_id={context.request_id}")
+    logger.info(f"Lambda invoked: request_id={context.aws_request_id}")
     logger.debug(f"Event: {json.dumps(event)}")
     
     try:

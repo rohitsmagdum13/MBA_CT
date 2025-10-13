@@ -16,17 +16,20 @@ Module Output:
     - Schema creation/modification logs
 """
 
-import pandas as pd
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import traceback
 
+import pandas as pd
+
 from MBA.core.exceptions import (
     DataIngestionError,
     SchemaInferenceError,
     DatabaseError,
-    FileDiscoveryError
+    FileDiscoveryError,
 )
 from MBA.core.logging_config import get_logger
 from MBA.core.settings import settings
@@ -38,283 +41,407 @@ logger = get_logger(__name__)
 
 class CSVIngestor:
     """
-    CSV to MySQL ingestion orchestrator.
-    
-    Manages the complete pipeline for loading CSV data into MySQL including:
-    - Schema inference and table creation/modification
-    - Batch data loading with chunk processing
-    - Row-level error handling and reporting
-    - Metadata tracking (source file, ingestion timestamp)
-    
+    CSV → MySQL ingestion orchestrator.
+
+    Responsibilities:
+    - Infer schema and create/alter target table.
+    - Stream CSV in chunks and perform batch inserts.
+    - Convert NaNs to NULLs, add metadata columns.
+    - Capture row/chunk-level errors with capped error list.
+
     Attributes:
-        rds_client (RDSClient): Database client instance
-        schema_inferrer (SchemaInferrer): Schema inference engine
-        chunk_size (int): Rows per batch insert
-        skip_duplicates (bool): Skip duplicate rows on insert
-        truncate_before_load (bool): Truncate table before loading
-        
+        rds_client: Database client instance (connection pooled).
+        schema_inferrer: Schema inference engine.
+        chunk_size: Rows per batch insert.
+        skip_duplicates: Use INSERT IGNORE to skip duplicates.
+        truncate_before_load: TRUNCATE table before loading.
+
     Thread Safety:
         Not thread-safe. Create separate instances for concurrent use.
     """
-    
+
     def __init__(
         self,
         rds_client: Optional[RDSClient] = None,
         schema_inferrer: Optional[SchemaInferrer] = None,
         chunk_size: Optional[int] = None,
         skip_duplicates: bool = False,
-        truncate_before_load: bool = False
+        truncate_before_load: bool = False,
     ):
         """
         Initialize CSV ingestor with dependencies.
-        
+
         Args:
-            rds_client (Optional[RDSClient]): Database client (creates new if None)
-            schema_inferrer (Optional[SchemaInferrer]): Schema engine (creates new if None)
-            chunk_size (Optional[int]): Batch size (default: from settings)
-            skip_duplicates (bool): Skip duplicate key errors (default: False)
-            truncate_before_load (bool): Clear table before load (default: False)
-            
+            rds_client: Database client (creates new if None).
+            schema_inferrer: Schema engine (creates new if None).
+            chunk_size: Batch size (default: settings.csv_chunk_size).
+            skip_duplicates: Skip duplicate key errors using INSERT IGNORE.
+            truncate_before_load: Clear table before load.
+
         Side Effects:
-            - Creates client instances if not provided
-            - Logs initialization
+            Creates client/inferrer instances if not provided and logs settings.
         """
         self.rds_client = rds_client or RDSClient()
         self.schema_inferrer = schema_inferrer or SchemaInferrer()
-        self.chunk_size = chunk_size or settings.csv_chunk_size
-        self.skip_duplicates = skip_duplicates
-        self.truncate_before_load = truncate_before_load
-        
+        self.chunk_size = int(chunk_size or settings.csv_chunk_size)
+        self.skip_duplicates = bool(skip_duplicates)
+        self.truncate_before_load = bool(truncate_before_load)
+
         logger.info(
-            f"Initialized CSVIngestor: chunk_size={self.chunk_size}, "
-            f"skip_duplicates={skip_duplicates}, truncate={truncate_before_load}"
+            "Initialized CSVIngestor: chunk_size=%s, skip_duplicates=%s, truncate=%s",
+            self.chunk_size,
+            self.skip_duplicates,
+            self.truncate_before_load,
         )
-    
+
+    # -------------------------------------------------------------------------
+    # Helpers to normalize information_schema output (fixes your error)
+    # -------------------------------------------------------------------------
+
+    def _normalize_col_record(self, rec: dict) -> dict:
+        """
+        Normalize a single information_schema row to the keys expected by
+        SchemaInferrer.compare_schemas: column_name, data_type, is_nullable,
+        column_key, column_type. Missing keys are set to None.
+        """
+        # Lower all keys to be case-insensitive
+        lower = {str(k).lower(): v for k, v in rec.items()}
+
+        def get_any(d: dict, *candidates: str) -> Any:
+            for k in candidates:
+                if k in d:
+                    return d[k]
+            return None
+
+        return {
+            "column_name": get_any(lower, "column_name", "column", "name"),
+            "data_type": get_any(lower, "data_type", "type"),
+            "is_nullable": get_any(lower, "is_nullable", "nullable"),
+            "column_key": get_any(lower, "column_key", "key"),
+            "column_type": get_any(lower, "column_type", "full_type"),
+        }
+
+    def _normalize_existing_columns(self, existing_columns: Any) -> List[dict]:
+        """
+        Accept whatever shape RDSClient.get_table_columns returns and normalize to:
+        list[dict] with keys -> column_name, data_type, is_nullable, column_key, column_type.
+        """
+        if existing_columns is None:
+            return []
+
+        # If a dict (single row), wrap as list
+        if isinstance(existing_columns, dict):
+            existing_columns = [existing_columns]
+
+        normed: List[dict] = []
+        for row in existing_columns:
+            if isinstance(row, dict):
+                normed.append(self._normalize_col_record(row))
+            elif isinstance(row, (list, tuple)):
+                # Fallback order: (COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_TYPE)
+                cn, dt, nul, ck, ct = (row + (None, None, None, None, None))[:5]
+                normed.append(
+                    self._normalize_col_record(
+                        {
+                            "COLUMN_NAME": cn,
+                            "DATA_TYPE": dt,
+                            "IS_NULLABLE": nul,
+                            "COLUMN_KEY": ck,
+                            "COLUMN_TYPE": ct,
+                        }
+                    )
+                )
+            else:
+                # Unknown row shape; skip but continue
+                continue
+
+        return normed
+
+    # -------------------------------------------------------------------------
+    # Schema operations
+    # -------------------------------------------------------------------------
+
     def ensure_table_schema(
-        self,
-        schema: Dict[str, Any],
-        update_if_exists: bool = True
+        self, schema: Dict[str, Any], update_if_exists: bool = True
     ) -> str:
         """
-        Ensure table exists with correct schema.
-        
-        Creates table if it doesn't exist, or adds new columns if table
-        exists and update_if_exists is True.
-        
+        Ensure table exists with correct schema (create or alter).
+
+        Normalizes information_schema results from RDSClient.get_table_columns()
+        so SchemaInferrer.compare_schemas() always receives the expected shape.
+
         Args:
-            schema (Dict[str, Any]): Table schema from infer_schema
-            update_if_exists (bool): Add missing columns to existing table
-            
+            schema: Table schema from SchemaInferrer.infer_schema().
+            update_if_exists: Add missing columns if table already exists.
+
         Returns:
-            str: Table name
-            
+            Final table name.
+
         Raises:
-            DatabaseError: If schema operations fail
-            
-        Side Effects:
-            - May create new table
-            - May alter existing table
-            - Logs schema operations
+            DatabaseError: If DDL operations fail.
         """
-        table_name = schema['table_name']
-        
+        table_name = schema["table_name"]
+
         try:
             if not self.rds_client.table_exists(table_name):
-                # Create new table
-                logger.info(f"Creating table: {table_name}")
-                
+                logger.info("Creating table: %s", table_name)
                 self.rds_client.create_table(
-                    table_name=table_name,
-                    columns=schema['columns']
+                    table_name=table_name, columns=schema["columns"]
                 )
-                
                 logger.info(
-                    f"Created table '{table_name}' with {len(schema['columns'])} columns"
+                    "Created table '%s' with %d columns",
+                    table_name,
+                    len(schema["columns"]),
                 )
-            
+
             elif update_if_exists:
-                # Check for new columns
-                existing_columns = self.rds_client.get_table_columns(table_name)
-                new_columns, compatible = self.schema_inferrer.compare_schemas(
-                    existing_columns,
-                    schema
+                raw_existing = self.rds_client.get_table_columns(table_name)
+                existing_columns = self._normalize_existing_columns(raw_existing)
+
+                logger.debug(
+                    "Existing columns (normalized) sample: %s",
+                    existing_columns[:1] if existing_columns else "[]",
                 )
-                
+
+                if not existing_columns:
+                    # Treat as new (add all)
+                    new_columns = schema["columns"]
+                    compatible = True
+                else:
+                    new_columns, compatible = self.schema_inferrer.compare_schemas(
+                        existing_columns, schema
+                    )
+
+                if not compatible:
+                    logger.warning(
+                        "Schema incompatibilities detected for '%s'—adding only new columns",
+                        table_name,
+                    )
+
                 if new_columns:
                     logger.info(
-                        f"Adding {len(new_columns)} new columns to '{table_name}'"
+                        "Adding %d new column(s) to '%s'",
+                        len(new_columns),
+                        table_name,
                     )
                     self.rds_client.add_columns(table_name, new_columns)
                 else:
-                    logger.info(f"Table '{table_name}' schema is up to date")
-            
+                    logger.info("Table '%s' schema is up to date", table_name)
+
             return table_name
-            
+
+        except KeyError as e:
+            logger.error("Invalid existing columns structure (missing key): %s", e)
+            raise DatabaseError(
+                f"Schema structure mismatch: missing key {e!s}",
+                details={
+                    "table": table_name,
+                    "expected_schema_keys": list(schema.keys()) if schema else None,
+                },
+            )
         except Exception as e:
             raise DatabaseError(
                 f"Failed to ensure table schema: {str(e)}",
-                details={"table": table_name, "error": str(e)}
+                details={"table": table_name, "error": str(e)},
             )
-    
+
+    # -------------------------------------------------------------------------
+    # Insert helpers
+    # -------------------------------------------------------------------------
+
+    def _build_insert_query(self, table_name: str, normalized_cols: List[str]) -> str:
+        """
+        Build parameterized INSERT query for batch loading.
+
+        Args:
+            table_name: Target table.
+            normalized_cols: Ordered list of column names in target table.
+
+        Returns:
+            MySQL INSERT string with %s placeholders.
+        """
+        placeholders = ", ".join(["%s"] * len(normalized_cols))
+        columns_str = ", ".join(f"`{c}`" for c in normalized_cols)
+        if self.skip_duplicates:
+            return f"INSERT IGNORE INTO `{table_name}` ({columns_str}) VALUES ({placeholders})"
+        return f"INSERT INTO `{table_name}` ({columns_str}) VALUES ({placeholders})"
+
+    def _validate_column_mapping(
+        self, frame_columns: List[str], column_mapping: Dict[str, str]
+    ) -> Tuple[bool, List[str]]:
+        """
+        Validate that the frame contains all original columns needed.
+
+        Returns:
+            (ok, missing_columns)
+        """
+        needed = list(column_mapping.keys())
+        missing = [c for c in needed if c not in frame_columns]
+        ok = not missing
+        if not ok:
+            logger.error("Missing required columns in chunk: %s", missing)
+        return ok, missing
+
+    # -------------------------------------------------------------------------
+    # Core load
+    # -------------------------------------------------------------------------
+
     def load_csv_to_table(
-        self,
-        csv_path: Path,
-        table_name: str,
-        column_mapping: Dict[str, str]
+        self, csv_path: Path, table_name: str, column_mapping: Dict[str, str]
     ) -> Dict[str, Any]:
         """
-        Load CSV data into MySQL table with batch processing.
-        
-        Reads CSV in chunks and inserts into database with error tracking
-        and metadata addition.
-        
+        Load CSV data into MySQL with streaming chunked inserts.
+
+        Performance:
+        - Restrict read to required columns via `usecols`.
+        - Avoid Python row loops; vectorized NA→None conversion + values.tolist().
+        - Build and reuse one INSERT statement for all chunks.
+
         Args:
-            csv_path (Path): CSV file to load
-            table_name (str): Target table name
-            column_mapping (Dict[str, str]): Original -> normalized column names
-            
+            csv_path: CSV file.
+            table_name: Target table.
+            column_mapping: Dict[original_col -> normalized_col].
+
         Returns:
-            Dict[str, Any]: Load statistics with keys:
-                - rows_attempted (int): Total rows processed
-                - rows_loaded (int): Successfully inserted rows
-                - rows_failed (int): Failed insertions
-                - errors (List[Dict]): Error details
-                - duration_seconds (float): Processing time
-                
+            Dict with attempted/loaded/failed counts, errors (capped), and timing.
+
         Raises:
-            DataIngestionError: If loading fails completely
-            
-        Side Effects:
-            - Inserts data into database
-            - Logs progress and errors
+            DataIngestionError: For top-level failures (I/O, DB, parsing).
         """
         start_time = datetime.now()
-        rows_attempted = 0
-        rows_loaded = 0
-        rows_failed = 0
-        errors = []
-        
-        logger.info(f"Loading data from {csv_path.name} into '{table_name}'")
-        
+        rows_attempted = rows_loaded = 0
+        errors: List[Dict[str, Any]] = []
+
+        logger.info("Loading data from %s into '%s'", csv_path.name, table_name)
+
         try:
-            # Truncate if requested
             if self.truncate_before_load:
-                logger.info(f"Truncating table '{table_name}'")
+                logger.info("Truncating table '%s' before load", table_name)
                 self.rds_client.truncate_table(table_name)
-            
-            # Get column names for INSERT
-            normalized_cols = list(column_mapping.values())
-            normalized_cols.extend(['ingestion_timestamp', 'source_file'])
-            
-            # Build INSERT query
-            placeholders = ', '.join(['%s'] * len(normalized_cols))
-            columns_str = ', '.join([f'`{col}`' for col in normalized_cols])
-            
-            if self.skip_duplicates:
-                insert_query = f"""
-                    INSERT IGNORE INTO `{table_name}` ({columns_str})
-                    VALUES ({placeholders})
-                """
-            else:
-                insert_query = f"""
-                    INSERT INTO `{table_name}` ({columns_str})
-                    VALUES ({placeholders})
-                """
-            
-            # Read and process CSV in chunks
+
+            # Build INSERT once
+            normalized_cols = list(column_mapping.values()) + [
+                "ingestion_timestamp",
+                "source_file",
+            ]
+            insert_query = self._build_insert_query(table_name, normalized_cols)
+
+            # Metadata (constant per-file)
             ingestion_timestamp = datetime.now()
             source_file = csv_path.name
-            
-            for chunk_idx, df_chunk in enumerate(
-                pd.read_csv(
-                    csv_path,
-                    encoding=settings.csv_encoding,
-                    chunksize=self.chunk_size
-                ),
-                start=1
-            ):
-                chunk_start = rows_attempted
-                
+
+            # Only read the columns we need for better I/O perf
+            usecols = list(column_mapping.keys())
+
+            chunk_iter = pd.read_csv(
+                csv_path,
+                encoding=settings.csv_encoding,
+                chunksize=self.chunk_size,
+                usecols=usecols,
+            )
+
+            for chunk_idx, df_chunk in enumerate(chunk_iter, start=1):
                 try:
-                    # Prepare batch data
-                    batch_data = []
-                    
-                    for idx, row in df_chunk.iterrows():
-                        try:
-                            # Map values to normalized column order
-                            values = []
-                            for orig_col, norm_col in column_mapping.items():
-                                val = row[orig_col]
-                                # Convert NaN to None for NULL
-                                if pd.isna(val):
-                                    values.append(None)
-                                else:
-                                    values.append(val)
-                            
-                            # Add metadata
-                            values.append(ingestion_timestamp)
-                            values.append(source_file)
-                            
-                            batch_data.append(tuple(values))
-                            rows_attempted += 1
-                            
-                        except Exception as e:
-                            rows_failed += 1
-                            errors.append({
-                                "row": int(idx) if not pd.isna(idx) else rows_attempted,
-                                "error": f"Row preparation failed: {str(e)}"
-                            })
-                    
-                    # Execute batch insert
-                    if batch_data:
+                    ok, missing = self._validate_column_mapping(
+                        df_chunk.columns.tolist(), column_mapping
+                    )
+                    if not ok:
+                        failed_count = len(df_chunk)
+                        errors.append(
+                            {
+                                "chunk": chunk_idx,
+                                "error": "Required columns missing from chunk",
+                                "missing_columns": missing,
+                                "failed_rows": failed_count,
+                            }
+                        )
+                        rows_attempted += failed_count
+                        continue
+
+                    # Reorder and replace NaN with None
+                    df_sel = df_chunk[usecols].where(pd.notna(df_chunk[usecols]), None)
+
+                    # Convert to python lists and append metadata
+                    records = df_sel.values.tolist()
+                    for rec in records:
+                        rec.append(ingestion_timestamp)
+                        rec.append(source_file)
+
+                    batch_size = len(records)
+                    rows_attempted += batch_size
+
+                    if batch_size:
                         affected = self.rds_client.execute_many(
-                            insert_query,
-                            batch_data,
-                            commit=True
+                            insert_query, [tuple(r) for r in records], commit=True
                         )
                         rows_loaded += affected
-                        
                         logger.info(
-                            f"Chunk {chunk_idx}: loaded {affected}/{len(batch_data)} rows "
-                            f"(total: {rows_loaded}/{rows_attempted})"
+                            "Chunk %d: loaded %d/%d rows (total loaded=%d attempted=%d)",
+                            chunk_idx,
+                            affected,
+                            batch_size,
+                            rows_loaded,
+                            rows_attempted,
                         )
-                
+
                 except DatabaseError as e:
-                    # Log chunk error but continue
-                    chunk_size = rows_attempted - chunk_start
-                    rows_failed += chunk_size
-                    errors.append({
-                        "chunk": chunk_idx,
-                        "rows": f"{chunk_start}-{rows_attempted}",
-                        "error": str(e)
-                    })
-                    logger.error(
-                        f"Chunk {chunk_idx} failed: {e.message}",
-                        extra={"details": e.details}
+                    # Whole chunk failed at DB level
+                    failed_count = len(df_chunk)
+                    errors.append(
+                        {
+                            "chunk": chunk_idx,
+                            "error": e.message,
+                            "details": e.details,
+                            "failed_rows": failed_count,
+                        }
                     )
-            
-            # Calculate duration
+                    rows_attempted += failed_count
+                    logger.error("Chunk %d failed at DB level: %s", chunk_idx, e.message)
+
+                except Exception as e:
+                    failed_count = len(df_chunk)
+                    errors.append(
+                        {
+                            "chunk": chunk_idx,
+                            "error": f"Chunk preparation failed: {str(e)}",
+                            "failed_rows": failed_count,
+                        }
+                    )
+                    rows_attempted += failed_count
+                    logger.error("Chunk %d preparation failed: %s", chunk_idx, str(e))
+
             duration = (datetime.now() - start_time).total_seconds()
-            
-            # Prepare results
-            results = {
+            rows_failed = rows_attempted - rows_loaded
+            result = {
                 "table_name": table_name,
                 "source_file": csv_path.name,
                 "rows_attempted": rows_attempted,
                 "rows_loaded": rows_loaded,
                 "rows_failed": rows_failed,
-                "errors": errors[:100],  # Limit error list
+                "errors": errors[:100],  # cap error list
                 "duration_seconds": round(duration, 2),
-                "success": rows_failed == 0
+                "success": rows_failed == 0,
             }
-            
+
             logger.info(
-                f"Load complete: {rows_loaded}/{rows_attempted} rows loaded "
-                f"({rows_failed} failed) in {duration:.2f}s"
+                "Load complete: %d/%d rows loaded (%d failed) in %.2fs",
+                rows_loaded,
+                rows_attempted,
+                rows_failed,
+                duration,
             )
-            
-            return results
-            
+            return result
+
+        except pd.errors.EmptyDataError:
+            raise DataIngestionError(
+                f"CSV file is empty or malformed: {csv_path}",
+                details={"csv_path": str(csv_path), "table": table_name},
+            )
+        except pd.errors.ParserError as e:
+            raise DataIngestionError(
+                f"CSV parsing error: {str(e)}",
+                details={"csv_path": str(csv_path), "table": table_name},
+            )
         except Exception as e:
             duration = (datetime.now() - start_time).total_seconds()
             raise DataIngestionError(
@@ -324,234 +451,182 @@ class CSVIngestor:
                     "table": table_name,
                     "rows_attempted": rows_attempted,
                     "rows_loaded": rows_loaded,
-                    "duration": duration
-                }
+                    "duration": duration,
+                },
             )
-    
+
+    # -------------------------------------------------------------------------
+    # Orchestration
+    # -------------------------------------------------------------------------
+
     def ingest_csv(
-        self,
-        csv_path: Path,
-        table_name: Optional[str] = None,
-        update_schema: bool = True
+        self, csv_path: Path, table_name: Optional[str] = None, update_schema: bool = True
     ) -> Dict[str, Any]:
         """
-        Complete CSV ingestion pipeline: infer → create/update → load.
-        
-        Orchestrates the full ingestion process from schema inference
-        through data loading.
-        
+        Full pipeline: infer → create/update → load.
+
         Args:
-            csv_path (Path): CSV file to ingest
-            table_name (Optional[str]): Target table (auto-generated if None)
-            update_schema (bool): Update existing schema (default: True)
-            
+            csv_path: CSV file to ingest.
+            table_name: Optional target table override.
+            update_schema: If True, add new columns to existing tables.
+
         Returns:
-            Dict[str, Any]: Ingestion results with keys:
-                - success (bool): Overall success status
-                - table_name (str): Target table name
-                - schema_created (bool): Whether new table was created
-                - load_results (Dict): Data loading statistics
-                
+            Results with success flag, table name, and load statistics.
+
         Raises:
-            FileDiscoveryError: If CSV doesn't exist
-            SchemaInferenceError: If schema inference fails
-            DataIngestionError: If loading fails
-            
-        Side Effects:
-            - May create/alter table schema
-            - Inserts data into database
-            - Comprehensive logging
-            
-        Example:
-            >>> ingestor = CSVIngestor()
-            >>> results = ingestor.ingest_csv(Path("data/members.csv"))
-            >>> print(f"Loaded {results['load_results']['rows_loaded']} rows")
+            FileDiscoveryError, SchemaInferenceError, DataIngestionError
         """
         if not csv_path.exists():
             raise FileDiscoveryError(
-                f"CSV file not found: {csv_path}",
-                details={"path": str(csv_path)}
+                f"CSV file not found: {csv_path}", details={"path": str(csv_path)}
             )
-        
-        logger.info(f"Starting CSV ingestion: {csv_path.name}")
+
+        logger.info("Starting CSV ingestion: %s", csv_path.name)
         pipeline_start = datetime.now()
-        
+
         try:
-            # Step 1: Infer schema
-            logger.info("Step 1/3: Inferring schema...")
+            # 1) Infer schema
+            logger.info("Step 1/3: Inferring schema…")
             schema = self.schema_inferrer.infer_schema(
-                csv_path,
-                add_metadata_columns=True
+                csv_path, add_metadata_columns=True
             )
-            
-            # Override table name if provided
             if table_name:
-                schema['table_name'] = table_name
-            
-            # Step 2: Ensure table exists with correct schema
-            logger.info("Step 2/3: Ensuring table schema...")
+                schema["table_name"] = table_name
+
+            # 2) Ensure table exists and is compatible
+            logger.info("Step 2/3: Ensuring table schema…")
             final_table_name = self.ensure_table_schema(
-                schema,
-                update_if_exists=update_schema
+                schema, update_if_exists=update_schema
             )
-            
-            # Build column mapping (original -> normalized)
+
+            # 3) Build original→normalized column mapping (exclude metadata)
             column_mapping = {
-                col['original_name']: col['name']
-                for col in schema['columns']
-                if col['original_name'] not in ['ingestion_timestamp', 'source_file']
+                c["original_name"]: c["name"]
+                for c in schema["columns"]
+                if c["original_name"] not in ("ingestion_timestamp", "source_file")
             }
-            
-            # Step 3: Load data
-            logger.info("Step 3/3: Loading data...")
+
+            # 4) Load CSV
+            logger.info("Step 3/3: Loading data…")
             load_results = self.load_csv_to_table(
-                csv_path,
-                final_table_name,
-                column_mapping
+                csv_path, final_table_name, column_mapping
             )
-            
-            # Calculate total duration
+
             pipeline_duration = (datetime.now() - pipeline_start).total_seconds()
-            
-            # Prepare results
             results = {
-                "success": load_results['success'],
+                "success": load_results["success"],
                 "csv_file": csv_path.name,
                 "table_name": final_table_name,
-                "columns_inferred": len(schema['columns']),
+                "columns_inferred": len(schema["columns"]),
                 "load_results": load_results,
-                "pipeline_duration_seconds": round(pipeline_duration, 2)
+                "pipeline_duration_seconds": round(pipeline_duration, 2),
             }
-            
-            if results['success']:
+
+            if results["success"]:
                 logger.info(
-                    f"✓ CSV ingestion successful: {csv_path.name} -> {final_table_name} "
-                    f"({load_results['rows_loaded']} rows in {pipeline_duration:.2f}s)"
+                    "✓ CSV ingestion successful: %s → %s (%d rows in %.2fs)",
+                    csv_path.name,
+                    final_table_name,
+                    load_results["rows_loaded"],
+                    pipeline_duration,
                 )
             else:
                 logger.warning(
-                    f"⚠ CSV ingestion completed with errors: "
-                    f"{load_results['rows_failed']} rows failed"
+                    "⚠ CSV ingestion completed with errors: %d rows failed",
+                    load_results["rows_failed"],
                 )
-            
+
             return results
-            
+
         except (SchemaInferenceError, DatabaseError, DataIngestionError) as e:
-            logger.error(
-                f"CSV ingestion failed: {e.message}",
-                extra={"details": e.details}
-            )
+            logger.error("CSV ingestion failed: %s", e.message, extra={"details": e.details})
             raise
         except Exception as e:
-            logger.error(f"Unexpected error during ingestion: {str(e)}")
+            logger.error("Unexpected error during ingestion: %s", str(e))
             logger.debug(traceback.format_exc())
             raise DataIngestionError(
                 f"CSV ingestion failed: {str(e)}",
-                details={"csv_path": str(csv_path), "error": str(e)}
+                details={"csv_path": str(csv_path), "error": str(e)},
             )
-    
+
+    # -------------------------------------------------------------------------
+    # Batch directory ingestion
+    # -------------------------------------------------------------------------
+
     def ingest_directory(
-        self,
-        directory: Path,
-        file_pattern: str = "*.csv",
-        continue_on_error: bool = True
+        self, directory: Path, file_pattern: str = "*.csv", continue_on_error: bool = True
     ) -> Dict[str, Any]:
         """
-        Ingest all CSV files in directory.
-        
-        Processes multiple CSV files with individual error handling
-        and summary reporting.
-        
+        Ingest all CSV files under a directory.
+
         Args:
-            directory (Path): Directory containing CSV files
-            file_pattern (str): Glob pattern for files (default: "*.csv")
-            continue_on_error (bool): Continue after individual failures
-            
+            directory: Directory path.
+            file_pattern: Glob for CSV selection.
+            continue_on_error: Continue upon individual file failures.
+
         Returns:
-            Dict[str, Any]: Batch results with keys:
-                - total_files (int): Number of files processed
-                - successful (int): Successfully ingested files
-                - failed (int): Failed ingestions
-                - results (List[Dict]): Individual file results
-                - errors (List[Dict]): Error details
-                
-        Example:
-            >>> results = ingestor.ingest_directory(Path("data/csv"))
-            >>> print(f"{results['successful']}/{results['total_files']} files loaded")
+            Batch summary with per-file results and errors.
         """
         if not directory.exists():
             raise FileDiscoveryError(
-                f"Directory not found: {directory}",
-                details={"path": str(directory)}
+                f"Directory not found: {directory}", details={"path": str(directory)}
             )
-        
         if not directory.is_dir():
             raise FileDiscoveryError(
-                f"Path is not a directory: {directory}",
-                details={"path": str(directory)}
+                f"Path is not a directory: {directory}", details={"path": str(directory)}
             )
-        
-        # Find CSV files
+
         csv_files = list(directory.glob(file_pattern))
-        
         if not csv_files:
-            logger.warning(f"No CSV files found in {directory}")
+            logger.warning("No CSV files found in %s", directory)
             return {
                 "total_files": 0,
                 "successful": 0,
                 "failed": 0,
                 "results": [],
-                "errors": []
+                "errors": [],
             }
-        
-        logger.info(
-            f"Starting batch ingestion: {len(csv_files)} files from {directory}"
-        )
-        
-        successful = 0
-        failed = 0
-        results = []
-        errors = []
-        
+
+        logger.info("Starting batch ingestion: %d files from %s", len(csv_files), directory)
+
+        successful = failed = 0
+        results: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+
         for idx, csv_file in enumerate(csv_files, 1):
-            logger.info(f"Processing file {idx}/{len(csv_files)}: {csv_file.name}")
-            
+            logger.info("Processing file %d/%d: %s", idx, len(csv_files), csv_file.name)
             try:
                 result = self.ingest_csv(csv_file)
                 results.append(result)
-                
-                if result['success']:
+                if result["success"]:
                     successful += 1
                 else:
                     failed += 1
-                
             except Exception as e:
                 failed += 1
                 error_info = {
                     "file": csv_file.name,
                     "error": str(e),
-                    "type": type(e).__name__
+                    "type": type(e).__name__,
                 }
                 errors.append(error_info)
-                
-                logger.error(f"Failed to ingest {csv_file.name}: {str(e)}")
-                
+                logger.error("Failed to ingest %s: %s", csv_file.name, str(e))
                 if not continue_on_error:
                     logger.error("Halting batch ingestion due to error")
                     break
-        
-        # Summary
+
         batch_results = {
             "total_files": len(csv_files),
             "successful": successful,
             "failed": failed,
             "results": results,
-            "errors": errors
+            "errors": errors,
         }
-        
+
         logger.info(
-            f"Batch ingestion complete: {successful}/{len(csv_files)} successful, "
-            f"{failed} failed"
+            "Batch ingestion complete: %d/%d successful, %d failed",
+            successful,
+            len(csv_files),
+            failed,
         )
-        
         return batch_results

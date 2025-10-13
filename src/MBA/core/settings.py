@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     aws_profile: Optional[str] = None
 
     # ---------------- S3 Buckets ----------------
-    s3_bucket_mba: str = "memberbenefitassistant-bucket"
+    s3_bucket_mba: str = "mb-assistant-bucket"
 
     # ---------------- S3 Prefixes ----------------
     s3_prefix_mba: str = "mba/"
@@ -84,12 +84,12 @@ class Settings(BaseSettings):
     s3_sse: str = "AES256"
 
     # ---------------- RDS Configuration ----------------
-    rds_host: str = "localhost"
-    rds_port: int = 3306
-    rds_database: str = "mba_db"
-    rds_username: str = "admin"
-    rds_password: str = ""
-    rds_params: str = "charset=utf8mb4"
+    RDS_HOST: str = "mba-mysql-db.conaisaskh5d.us-east-1.rds.amazonaws.com"
+    RDS_PORT: int = 3306
+    RDS_DATABASE: str = "mba_db"
+    RDS_USERNAME: str = "admin"
+    RDS_PASSWORD: str = "Admin12345"
+    RDS_PARAMS: str = "charset=utf8mb4"
     
     # Connection pooling
     rds_pool_size: int = 5

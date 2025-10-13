@@ -440,6 +440,16 @@ class SchemaInferrer:
             >>> new_schema = inferrer.infer_schema(Path("updated.csv"))
             >>> new_cols, compatible = inferrer.compare_schemas(existing, new_schema)
         """
+        # Handle empty existing columns list
+        if not existing_columns:
+            logger.info("No existing columns found - all columns are new")
+            return new_schema['columns'], True
+            
+        # Validate existing columns structure
+        if existing_columns and 'column_name' not in existing_columns[0]:
+            logger.error(f"Invalid existing columns structure: {existing_columns[0].keys() if existing_columns else 'empty'}")
+            raise ValueError(f"Expected 'column_name' key in existing columns, got: {list(existing_columns[0].keys()) if existing_columns else 'empty list'}")
+            
         existing_names = {col['column_name'].lower() for col in existing_columns}
         
         new_columns = []

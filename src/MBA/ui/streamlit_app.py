@@ -134,13 +134,12 @@ def process_file_upload(
             compute_if_missing=True
         )
         
-        doc_type = file_processor.get_document_type(temp_file)
-        s3_key = file_processor.route_file(
-            temp_file,
-            base_prefix="",
-            use_type_folders=True,
-            preserve_structure=False
-        )
+        # Get document type from original filename (not temp file)
+        original_path = Path(file_name)
+        doc_type = file_processor.get_document_type(original_path)
+        
+        # Generate S3 key using original filename
+        s3_key = f"{doc_type.value}/{file_name}"
         
         s3_uri = s3_client.upload_file(
             temp_file,
