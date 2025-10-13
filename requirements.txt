@@ -1,0 +1,26 @@
+# Core dependencies
+boto3
+python-dotenv
+pydantic
+pydantic-settings
+pandas
+
+# Database connectivity
+pymysql
+cryptography  # Required by PyMySQL for SSL connections
+
+# Agent frameworkcls
+strands-agents
+strands-agents-tools
+
+# Web frameworks
+fastapi
+uvicorn
+streamlit
+
+# Template engine
+jinja2
+
+# Development tools (optional)
+pytest
+pytest-asyncio

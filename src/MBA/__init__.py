@@ -1,0 +1,1 @@
+"""MBA ingestion system package."""
