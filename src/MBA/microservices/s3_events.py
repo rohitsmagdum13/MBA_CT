@@ -28,8 +28,8 @@ from botocore.exceptions import ClientError
 from MBA.core.logging_config import get_logger, setup_root_logger
 from MBA.core.exceptions import DataIngestionError, FileDiscoveryError
 from MBA.core.settings import settings
-from MBA.services.csv_ingestor import CSVIngestor
-from MBA.services.rds_client import RDSClient
+from MBA.services.ingestion.orchestrator import CSVIngestor
+from MBA.services.database.client import RDSClient
 
 # Setup logging
 setup_root_logger()

@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     # Optional: server-side encryption for uploads (AES256 or aws:kms)
     s3_sse: str = "AES256"
 
+    # ---------------- Textract Configuration ----------------
+    pdf_prefix: str = "mba/pdf/"
+    output_prefix: str = "mba/textract-output/"
+    textract_features: str = "TABLES,FORMS"  # Comma-separated
+    textract_max_seconds: int = 240  # Max polling time
+    textract_backoff_start_sec: float = 2.0
+    textract_backoff_max_sec: float = 12.0
+
     # ---------------- RDS Configuration ----------------
     RDS_HOST: str = "mba-mysql-db.conaisaskh5d.us-east-1.rds.amazonaws.com"
     RDS_PORT: int = 3306

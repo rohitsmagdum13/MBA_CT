@@ -154,3 +154,16 @@ class DataIngestionError(MBAIngestionError):
         - Invalid data values
     """
     pass
+
+
+class TextractError(MBAIngestionError):
+    """
+    Raised for Textract orchestration failures.
+
+    Common scenarios:
+        - StartDocument* API failure
+        - Polling timeout or terminal FAILED status
+        - GetDocument* pagination errors
+        - Persisting outputs to S3 fails
+    """
+    pass

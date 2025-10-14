@@ -147,7 +147,9 @@ class RDSClient:
                 charset='utf8mb4',
                 cursorclass=DictCursor,
                 autocommit=False,
-                connect_timeout=10
+                connect_timeout=10,
+                read_timeout=30,  # Add read timeout
+                write_timeout=30  # Add write timeout
             )
             return connection
         except Exception as e:

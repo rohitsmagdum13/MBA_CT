@@ -15,6 +15,7 @@ Module Output:
     - Configured logger instances for modules
 """
 import logging
+import os
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -49,26 +50,29 @@ def get_logger(name: str) -> logging.Logger:
         "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s"
         Example: "2024-01-15 10:30:45 | INFO     | mba.cli:upload_single:145 | Upload complete"
     """
-    # Check if logger already configured
+    # Check if running in Lambda
+    is_lambda = 'AWS_EXECUTION_ENV' in os.environ or 'AWS_LAMBDA_FUNCTION_NAME' in os.environ
+    
     if name in _configured_loggers:
         return logging.getLogger(name)
     
-    # Create logger
     logger = logging.getLogger(name)
     logger.setLevel(settings.log_level)
     
-    # Prevent duplicate handlers when logger is retrieved multiple times
     if logger.hasHandlers():
         return logger
     
-    # Create log directory if it doesn't exist
-    settings.log_dir.mkdir(exist_ok=True)
-    
     # Define log format
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    if is_lambda:
+        # Lambda already captures stdout to CloudWatch, use simpler format
+        formatter = logging.Formatter(
+            "%(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s"
+        )
+    else:
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
     
     # Console handler - outputs to stdout
     console_handler = logging.StreamHandler(sys.stdout)
@@ -76,20 +80,20 @@ def get_logger(name: str) -> logging.Logger:
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
     
-    # File handler - rotating log file
-    log_file_path = settings.log_dir / settings.log_file
-    file_handler = RotatingFileHandler(
-        log_file_path,
-        maxBytes=10_485_760,  # 10MB
-        backupCount=5
-    )
-    file_handler.setLevel(settings.log_level)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    # File handler - only for non-Lambda environments
+    if not is_lambda:
+        settings.log_dir.mkdir(exist_ok=True)
+        log_file_path = settings.log_dir / settings.log_file
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=10_485_760,  # 10MB
+            backupCount=5
+        )
+        file_handler.setLevel(settings.log_level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
     
-    # Mark logger as configured
     _configured_loggers.add(name)
-    
     return logger
 
 

@@ -18,6 +18,7 @@ Module Output:
 """
 
 import mimetypes
+import os
 import time
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -90,20 +91,30 @@ class S3Client:
         self.retry_delay = retry_delay
         
         try:
-            # Create boto3 session with optional profile
-            session_kwargs = {}
-            if settings.aws_profile:
-                session_kwargs["profile_name"] = settings.aws_profile
-            elif settings.aws_access_key_id and settings.aws_secret_access_key:
-                session_kwargs.update({
-                    "aws_access_key_id": settings.aws_access_key_id,
-                    "aws_secret_access_key": settings.aws_secret_access_key
-                })
+            # CRITICAL FIX: Detect if running in Lambda
+            is_lambda = 'AWS_EXECUTION_ENV' in os.environ or 'AWS_LAMBDA_FUNCTION_NAME' in os.environ
             
-            session = boto3.Session(
-                region_name=settings.aws_default_region,
-                **session_kwargs
-            )
+            if is_lambda:
+                # In Lambda: Use execution role automatically (NO explicit credentials)
+                session = boto3.Session(region_name=settings.aws_default_region)
+                logger.info("Running in AWS Lambda - using execution role for S3")
+            else:
+                # Running locally: Use credentials from settings if available
+                session_kwargs = {}
+                if settings.aws_profile:
+                    session_kwargs["profile_name"] = settings.aws_profile
+                elif settings.aws_access_key_id and settings.aws_secret_access_key:
+                    session_kwargs.update({
+                        "aws_access_key_id": settings.aws_access_key_id,
+                        "aws_secret_access_key": settings.aws_secret_access_key
+                    })
+                
+                session = boto3.Session(
+                    region_name=settings.aws_default_region,
+                    **session_kwargs
+                )
+                logger.info("Running locally - using credentials from settings")
+            
             self._s3_client = session.client("s3")
             
             logger.info(

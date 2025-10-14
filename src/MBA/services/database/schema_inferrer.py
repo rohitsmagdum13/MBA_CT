@@ -51,7 +51,7 @@ class SchemaInferrer:
     
     def __init__(
         self,
-        sample_rows: int = 1000,
+        sample_rows: int = 500,  # Reduced from 1000 for Lambda
         max_varchar_length: int = 500,
         use_text_threshold: int = 1000
     ):
@@ -59,7 +59,7 @@ class SchemaInferrer:
         Initialize schema inferrer with configuration.
         
         Args:
-            sample_rows (int): Rows to sample for type detection (default: 1000)
+            sample_rows (int): Rows to sample for type detection (default: 500)
             max_varchar_length (int): Max VARCHAR size (default: 500)
             use_text_threshold (int): Switch to TEXT above length (default: 1000)
             
