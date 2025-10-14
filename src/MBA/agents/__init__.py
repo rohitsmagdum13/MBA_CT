@@ -2,13 +2,14 @@
 MBA Agents package for member services.
 
 This package provides AWS Bedrock-powered agents for member verification,
-deductible/OOP lookups, and benefit accumulator queries using Strands
-agent orchestration and RDS MySQL backend integration.
+deductible/OOP lookups, benefit accumulator queries, and benefit coverage
+RAG using Strands agent orchestration.
 
 Exports:
     MemberVerificationAgent: High-level async member verification interface
     DeductibleOOPAgent: High-level async deductible/OOP lookup interface
     BenefitAccumulatorAgent: High-level async benefit accumulator lookup interface
+    BenefitCoverageRAGAgent: High-level async benefit coverage RAG interface
     verification_agent: Underlying Strands verification agent instance
     deductible_oop_agent: Underlying Strands deductible/OOP agent instance
     benefit_accumulator_agent: Underlying Strands benefit accumulator agent instance
@@ -43,6 +44,18 @@ Example:
 
     if result.get("found"):
         print(f"Found {len(result['benefits'])} benefits")
+
+    # Benefit Coverage RAG
+    from MBA.agents import BenefitCoverageRAGAgent
+
+    agent = BenefitCoverageRAGAgent()
+    # Prepare pipeline
+    result = await agent.prepare_pipeline(
+        s3_bucket="mb-assistant-bucket",
+        textract_prefix="mba/textract-output/mba/pdf/policy.pdf/job-123/"
+    )
+    # Query documents
+    result = await agent.query(question="Is massage therapy covered?")
 """
 
 from .member_verification_agent import (
@@ -60,11 +73,15 @@ from .benefit_accumulator_agent import (
     benefit_accumulator_agent,
     get_benefit_accumulator
 )
+from .benefit_coverage_rag_agent import BenefitCoverageRAGAgent
+from .local_rag_agent import LocalRAGAgent
 
 __all__ = [
     "MemberVerificationAgent",
     "DeductibleOOPAgent",
     "BenefitAccumulatorAgent",
+    "BenefitCoverageRAGAgent",
+    "LocalRAGAgent",
     "verification_agent",
     "deductible_oop_agent",
     "benefit_accumulator_agent",
@@ -73,4 +90,4 @@ __all__ = [
     "get_benefit_accumulator"
 ]
 
-__version__ = "2.0.0"
+__version__ = "2.2.0"

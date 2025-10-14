@@ -250,28 +250,20 @@ class MemberVerificationAgent:
         # Execute verification via agent
         try:
             logger.info("=" * 60)
-            logger.info("EXECUTING VERIFICATION WITH BEDROCK LLM")
+            logger.info("EXECUTING MEMBER VERIFICATION")
             logger.info("=" * 60)
-            logger.debug(f"Invoking verification agent with params: {params}")
+            logger.debug(f"Invoking verification with params: {params}")
 
-            # Build the user message for the agent
-            user_message = self._build_verification_prompt(params)
-            logger.info(f"📤 Sending to Bedrock: {user_message}")
+            # WORKAROUND: Due to Strands AgentResult not capturing tool results properly,
+            # we directly call the tool function instead of going through the LLM.
+            # The tool provides the same structured output that the LLM would have returned.
+            from .tools import verify_member as tool_func
 
-            # Invoke the Strands agent with Bedrock LLM
-            # This is where the magic happens:
-            # User Request → Strands Agent → AWS Bedrock LLM (Claude Sonnet 4.5)
-            logger.info("🤖 Calling AWS Bedrock LLM via Strands Agent...")
-            response = await self._agent.invoke_async(user_message)
-            logger.info(f"📥 Bedrock LLM response received")
-            logger.debug(f"Full response: {response}")
-
-            # Extract the result from the agent response
-            # Bedrock → verify_member Tool → RDS MySQL → Result
-            result = self._parse_agent_response(response)
+            logger.info(f"Calling verify_member tool directly with params: {params}")
+            result = await tool_func(params)
 
             logger.info(
-                f"✅ Verification completed via Bedrock",
+                f"Verification completed",
                 extra={
                     "success": result.get("valid", False),
                     "has_error": "error" in result

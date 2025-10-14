@@ -44,7 +44,7 @@ from MBA.services.storage.file_processor import FileProcessor
 from MBA.services.storage.duplicate_detector import DuplicateDetector
 from MBA.services.ingestion.orchestrator import CSVIngestor
 from MBA.services.database.client import RDSClient
-from MBA.agents import MemberVerificationAgent, DeductibleOOPAgent, BenefitAccumulatorAgent
+from MBA.agents import MemberVerificationAgent, DeductibleOOPAgent, BenefitAccumulatorAgent, BenefitCoverageRAGAgent
 
 # Setup logging
 setup_root_logger()
@@ -66,6 +66,7 @@ csv_ingestor: Optional[CSVIngestor] = None
 verification_agent: Optional[MemberVerificationAgent] = None
 deductible_oop_agent: Optional[DeductibleOOPAgent] = None
 benefit_accumulator_agent: Optional[BenefitAccumulatorAgent] = None
+benefit_coverage_rag_agent: Optional[BenefitCoverageRAGAgent] = None
 
 # Job tracking (in-memory for simplicity)
 ingestion_jobs: Dict[str, Dict[str, Any]] = {}
@@ -156,6 +157,22 @@ class BenefitAccumulatorRequest(BaseModel):
     service: Optional[str] = None
 
 
+class RAGPrepareRequest(BaseModel):
+    """Request model for RAG pipeline preparation."""
+    s3_bucket: str
+    textract_prefix: str
+    index_name: Optional[str] = None
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
+
+
+class RAGQueryRequest(BaseModel):
+    """Request model for RAG query."""
+    question: str
+    index_name: Optional[str] = None
+    k: int = 5
+
+
 # ============== Startup/Shutdown ==============
 
 @app.on_event("startup")
@@ -168,7 +185,7 @@ async def startup_event():
         - Tests database connectivity
         - Logs initialization status
     """
-    global s3_client, file_processor, duplicate_detector, rds_client, csv_ingestor, verification_agent, deductible_oop_agent, benefit_accumulator_agent
+    global s3_client, file_processor, duplicate_detector, rds_client, csv_ingestor, verification_agent, deductible_oop_agent, benefit_accumulator_agent, benefit_coverage_rag_agent
 
     try:
         # Initialize S3 client
@@ -199,6 +216,7 @@ async def startup_event():
         verification_agent = MemberVerificationAgent()
         deductible_oop_agent = DeductibleOOPAgent()
         benefit_accumulator_agent = BenefitAccumulatorAgent()
+        benefit_coverage_rag_agent = BenefitCoverageRAGAgent()
 
         logger.info("All services initialized successfully")
         
@@ -239,7 +257,8 @@ async def health_check():
         "csv_ingestor": "initialized" if csv_ingestor else "not_initialized",
         "verification_agent": "initialized" if verification_agent else "not_initialized",
         "deductible_oop_agent": "initialized" if deductible_oop_agent else "not_initialized",
-        "benefit_accumulator_agent": "initialized" if benefit_accumulator_agent else "not_initialized"
+        "benefit_accumulator_agent": "initialized" if benefit_accumulator_agent else "not_initialized",
+        "benefit_coverage_rag_agent": "initialized" if benefit_coverage_rag_agent else "not_initialized"
     }
     
     # Test database connectivity
@@ -810,6 +829,138 @@ async def lookup_benefit_accumulator(request: BenefitAccumulatorRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Benefit accumulator lookup failed: {str(e)}")
+
+
+# ============== Benefit Coverage RAG Endpoints ==============
+
+@app.post("/rag/prepare", tags=["RAG"])
+async def prepare_rag_pipeline(request: RAGPrepareRequest):
+    """
+    Prepare RAG pipeline from Textract output in S3.
+
+    This endpoint processes Textract-extracted documents and indexes them
+    for semantic search and question answering.
+
+    Flow:
+    1. Extract text from Textract JSON files in S3
+    2. Apply intelligent chunking for benefit coverage documents
+    3. Generate embeddings using AWS Bedrock Titan
+    4. Index chunks in vector store (OpenSearch/Qdrant)
+
+    Args:
+        request: RAGPrepareRequest with S3 bucket and Textract output prefix
+
+    Returns:
+        JSON response with preparation results
+
+    Example Request:
+        ```json
+        {
+            "s3_bucket": "mb-assistant-bucket",
+            "textract_prefix": "mba/textract-output/mba/pdf/policy.pdf/job-123/",
+            "index_name": "benefit_coverage_rag_index",
+            "chunk_size": 1000,
+            "chunk_overlap": 200
+        }
+        ```
+
+    Example Response:
+        ```json
+        {
+            "success": true,
+            "message": "Processed 10 docs into 45 chunks",
+            "chunks_count": 45,
+            "doc_count": 10,
+            "index_name": "benefit_coverage_rag_index"
+        }
+        ```
+    """
+    if not benefit_coverage_rag_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Benefit coverage RAG service not initialized"
+        )
+
+    try:
+        result = await benefit_coverage_rag_agent.prepare_pipeline(
+            s3_bucket=request.s3_bucket,
+            textract_prefix=request.textract_prefix,
+            index_name=request.index_name,
+            chunk_size=request.chunk_size,
+            chunk_overlap=request.chunk_overlap
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG pipeline preparation failed: {str(e)}")
+
+
+@app.post("/rag/query", tags=["RAG"])
+async def query_benefit_coverage(request: RAGQueryRequest):
+    """
+    Query benefit coverage documents using RAG.
+
+    This endpoint uses Retrieval-Augmented Generation to answer questions
+    about benefit coverage policies by:
+    1. Performing semantic search over indexed documents
+    2. Reranking results using AWS Bedrock Cohere Rerank
+    3. Generating answers using AWS Bedrock Claude LLM
+    4. Providing source citations
+
+    Args:
+        request: RAGQueryRequest with question and optional parameters
+
+    Returns:
+        JSON response with answer and sources
+
+    Example Request:
+        ```json
+        {
+            "question": "Is massage therapy covered?",
+            "index_name": "benefit_coverage_rag_index",
+            "k": 5
+        }
+        ```
+
+    Example Response:
+        ```json
+        {
+            "success": true,
+            "answer": "Massage therapy is covered with a limit of 6 visits per calendar year...",
+            "sources": [
+                {
+                    "source_id": 1,
+                    "content": "Massage Therapy: Covered with 6 visit limit...",
+                    "metadata": {
+                        "source": "policy.pdf",
+                        "page": 15,
+                        "section_title": "Therapy Services"
+                    }
+                }
+            ],
+            "question": "Is massage therapy covered?",
+            "retrieved_docs_count": 3
+        }
+        ```
+    """
+    if not benefit_coverage_rag_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Benefit coverage RAG service not initialized"
+        )
+
+    try:
+        result = await benefit_coverage_rag_agent.query(
+            question=request.question,
+            index_name=request.index_name,
+            k=request.k
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG query failed: {str(e)}")
 
 
 # ============== Server Runner ==============

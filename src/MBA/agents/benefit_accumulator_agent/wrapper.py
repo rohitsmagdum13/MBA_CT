@@ -131,7 +131,7 @@ class BenefitAccumulatorAgent:
 
     def _parse_agent_response(self, response: Any) -> Dict[str, Any]:
         """
-        Parse the Strands agent response to extract lookup result.
+        Parse the Strands agent response to extract benefit accumulator result.
 
         The agent response contains the tool execution results. We need to
         extract the structured data returned by the get_benefit_accumulator tool.
@@ -142,25 +142,73 @@ class BenefitAccumulatorAgent:
         Returns:
             Dict[str, Any]: Benefit accumulator lookup result
         """
+        import json
+        import re
+
         try:
-            # Strands agent returns a message object
-            # Check if it has tool calls and results
+            import json as json_lib
+
+            # The key insight: Strands agent processes tool calls during invoke_async
+            # but the FINAL message in AgentResult.message contains the LLM's response AFTER tool execution
+            # We need to look at the state to find tool results OR the message content for the final text
+
+            # Check if response has stop_reason indicating tool use completed
+            if hasattr(response, 'stop_reason'):
+                logger.info(f"DEBUG: stop_reason = {response.stop_reason}")
+
+            # Try to serialize the entire response to understand its structure
+            try:
+                response_dict = {
+                    'stop_reason': getattr(response, 'stop_reason', None),
+                    'message': getattr(response, 'message', None),
+                    'state': getattr(response, 'state', None)
+                }
+                logger.info(f"DEBUG: Full response structure = {json_lib.dumps(response_dict, default=str, indent=2)[:1000]}")
+            except Exception as e:
+                logger.info(f"DEBUG: Could not serialize response: {e}")
+
+            # Handle object responses with tool_calls
             if hasattr(response, 'tool_calls') and response.tool_calls:
-                # Get the last tool call result (get_benefit_accumulator)
-                for tool_call in response.tool_calls:
+                logger.info(f"DEBUG: Found {len(response.tool_calls)} tool_calls")
+                for i, tool_call in enumerate(response.tool_calls):
+                    logger.info(f"DEBUG: Tool call {i} - has result: {hasattr(tool_call, 'result')}")
                     if hasattr(tool_call, 'result'):
-                        return tool_call.result
+                        logger.info(f"DEBUG: Tool result type: {type(tool_call.result)}")
+                        logger.info(f"DEBUG: Tool result (first 500 chars): {str(tool_call.result)[:500]}")
+                        if isinstance(tool_call.result, dict):
+                            return tool_call.result
+                        # Try to parse if it's a string
+                        try:
+                            return json.loads(str(tool_call.result))
+                        except:
+                            pass
 
-            # If no tool calls, check for content
+            # Handle object responses with content
             if hasattr(response, 'content'):
-                import json
-                # Try to parse JSON from content
-                try:
-                    return json.loads(response.content)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                logger.info(f"DEBUG: Found content type: {type(response.content)}")
+                response_str = response.content
+            else:
+                response_str = str(response)
 
-            # Fallback: return error
+            # Convert to string if needed
+            if not isinstance(response_str, str):
+                response_str = str(response_str)
+
+            logger.info(f"DEBUG: Attempting to parse string (first 300 chars): {response_str[:300]}")
+
+            try:
+                # Direct JSON
+                return json.loads(response_str)
+            except json.JSONDecodeError:
+                # Extract JSON substring if wrapped inside text
+                match = re.search(r"\{.*\}", response_str, re.DOTALL)
+                if match:
+                    try:
+                        return json.loads(match.group(0))
+                    except json.JSONDecodeError:
+                        pass
+
+            # If all fails
             logger.warning(f"Could not parse agent response: {response}")
             return {"error": "Failed to parse agent response"}
 
@@ -245,28 +293,20 @@ class BenefitAccumulatorAgent:
         # Execute lookup via agent
         try:
             logger.info("=" * 60)
-            logger.info("EXECUTING BENEFIT ACCUMULATOR LOOKUP WITH BEDROCK LLM")
+            logger.info("EXECUTING BENEFIT ACCUMULATOR LOOKUP")
             logger.info("=" * 60)
-            logger.debug(f"Invoking benefit accumulator agent with params: {params}")
+            logger.debug(f"Invoking benefit accumulator lookup with params: {params}")
 
-            # Build the user message for the agent
-            user_message = self._build_lookup_prompt(params)
-            logger.info(f"📤 Sending to Bedrock: {user_message}")
+            # WORKAROUND: Due to Strands AgentResult not capturing tool results properly,
+            # we directly call the tool function instead of going through the LLM.
+            # The tool provides the same structured output that the LLM would have returned.
+            from .tools import get_benefit_accumulator as tool_func
 
-            # Invoke the Strands agent with Bedrock LLM
-            # This is where the magic happens:
-            # User Request → Strands Agent → AWS Bedrock LLM (Claude Sonnet 4.5)
-            logger.info("🤖 Calling AWS Bedrock LLM via Strands Agent...")
-            response = await self._agent.invoke_async(user_message)
-            logger.info(f"📥 Bedrock LLM response received")
-            logger.debug(f"Full response: {response}")
-
-            # Extract the result from the agent response
-            # Bedrock → get_benefit_accumulator Tool → RDS MySQL → Result
-            result = self._parse_agent_response(response)
+            logger.info(f"Calling get_benefit_accumulator tool directly with params: {params}")
+            result = await tool_func(params)
 
             logger.info(
-                f"✅ Lookup completed via Bedrock",
+                f"Lookup completed",
                 extra={
                     "success": result.get("found", False),
                     "has_error": "error" in result

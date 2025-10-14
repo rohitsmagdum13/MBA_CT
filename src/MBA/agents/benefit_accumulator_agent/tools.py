@@ -159,11 +159,11 @@ async def get_benefit_accumulator(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "Lookup failed: Database module unavailable"}
 
     try:
-        # Build query
+        # Build query (using DISTINCT to handle duplicate records in database)
         if service:
             service = str(service).strip()
             query_sql = """
-                SELECT service, allowed_limit, used, remaining
+                SELECT DISTINCT service, allowed_limit, used, remaining
                 FROM benefit_accumulator
                 WHERE member_id = :member_id AND service = :service
                 ORDER BY service
@@ -172,7 +172,7 @@ async def get_benefit_accumulator(params: Dict[str, Any]) -> Dict[str, Any]:
             logger.debug(f"Executing benefit lookup for member {member_id}, service {service}")
         else:
             query_sql = """
-                SELECT service, allowed_limit, used, remaining
+                SELECT DISTINCT service, allowed_limit, used, remaining
                 FROM benefit_accumulator
                 WHERE member_id = :member_id
                 ORDER BY service

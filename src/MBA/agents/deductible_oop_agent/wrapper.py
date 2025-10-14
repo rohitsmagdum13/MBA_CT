@@ -135,10 +135,8 @@ class DeductibleOOPAgent:
 
     def _parse_agent_response(self, response: Any) -> Dict[str, Any]:
         """
-        Parse the Strands agent response to extract lookup result.
-
-        The agent response contains the tool execution results. We need to
-        extract the structured data returned by the get_deductible_oop tool.
+        Parse Claude or Strands agent output robustly.
+        Accepts raw JSON or JSON embedded in text.
 
         Args:
             response: Response from agent.invoke_async()
@@ -146,31 +144,38 @@ class DeductibleOOPAgent:
         Returns:
             Dict[str, Any]: Deductible/OOP lookup result
         """
-        try:
-            # Strands agent returns a message object
-            # Check if it has tool calls and results
-            if hasattr(response, 'tool_calls') and response.tool_calls:
-                # Get the last tool call result (get_deductible_oop)
-                for tool_call in response.tool_calls:
-                    if hasattr(tool_call, 'result'):
-                        return tool_call.result
+        import json
+        import re
 
-            # If no tool calls, check for content
-            if hasattr(response, 'content'):
-                import json
-                # Try to parse JSON from content
+        # Handle object responses with tool_calls
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            for tool_call in response.tool_calls:
+                if hasattr(tool_call, 'result'):
+                    return tool_call.result
+
+        # Handle object responses with content
+        if hasattr(response, 'content'):
+            response = response.content
+
+        # Convert to string if needed
+        if not isinstance(response, str):
+            response = str(response)
+
+        try:
+            # Direct JSON
+            return json.loads(response)
+        except json.JSONDecodeError:
+            # Extract JSON substring if wrapped inside text
+            match = re.search(r"\{.*\}", response, re.DOTALL)
+            if match:
                 try:
-                    return json.loads(response.content)
-                except (json.JSONDecodeError, TypeError):
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
                     pass
 
-            # Fallback: return error
-            logger.warning(f"Could not parse agent response: {response}")
-            return {"error": "Failed to parse agent response"}
-
-        except Exception as e:
-            logger.error(f"Error parsing agent response: {str(e)}", exc_info=True)
-            return {"error": f"Response parsing failed: {str(e)}"}
+        # If all fails
+        logger.warning(f"Could not parse agent response: {response}")
+        return {"error": "Failed to parse agent response"}
 
     async def get_deductible_oop(
         self,
@@ -245,28 +250,20 @@ class DeductibleOOPAgent:
         # Execute lookup via agent
         try:
             logger.info("=" * 60)
-            logger.info("EXECUTING DEDUCTIBLE/OOP LOOKUP WITH BEDROCK LLM")
+            logger.info("EXECUTING DEDUCTIBLE/OOP LOOKUP")
             logger.info("=" * 60)
-            logger.debug(f"Invoking deductible/OOP agent with params: {params}")
+            logger.debug(f"Invoking deductible/OOP lookup with params: {params}")
 
-            # Build the user message for the agent
-            user_message = self._build_lookup_prompt(params)
-            logger.info(f"📤 Sending to Bedrock: {user_message}")
+            # WORKAROUND: Due to Strands AgentResult not capturing tool results properly,
+            # we directly call the tool function instead of going through the LLM.
+            # The tool provides the same structured output that the LLM would have returned.
+            from .tools import get_deductible_oop as tool_func
 
-            # Invoke the Strands agent with Bedrock LLM
-            # This is where the magic happens:
-            # User Request → Strands Agent → AWS Bedrock LLM (Claude Sonnet 4.5)
-            logger.info("🤖 Calling AWS Bedrock LLM via Strands Agent...")
-            response = await self._agent.invoke_async(user_message)
-            logger.info(f"📥 Bedrock LLM response received")
-            logger.debug(f"Full response: {response}")
-
-            # Extract the result from the agent response
-            # Bedrock → get_deductible_oop Tool → RDS MySQL → Result
-            result = self._parse_agent_response(response)
+            logger.info(f"Calling get_deductible_oop tool directly with params: {params}")
+            result = await tool_func(params)
 
             logger.info(
-                f"✅ Lookup completed via Bedrock",
+                f"Lookup completed",
                 extra={
                     "success": result.get("found", False),
                     "has_error": "error" in result
