@@ -45,6 +45,8 @@ from MBA.services.ingestion.orchestrator import CSVIngestor
 from MBA.agents.member_verification_agent import MemberVerificationAgent
 from MBA.agents.deductible_oop_agent import DeductibleOOPAgent
 from MBA.agents.benefit_accumulator_agent import BenefitAccumulatorAgent
+from MBA.agents.benefit_coverage_rag_agent import BenefitCoverageRAGAgent
+from MBA.agents.local_rag_agent import LocalRAGAgent
 
 # Setup logging
 setup_root_logger()
@@ -244,6 +246,8 @@ def main():
     verification_agent = None
     deductible_oop_agent = None
     benefit_accumulator_agent = None
+    benefit_coverage_rag_agent = None
+    local_rag_agent = None
     
     # Header
     st.title("📤 MBA Upload & Ingestion Service")
@@ -295,7 +299,7 @@ def main():
         st.caption(f"**Max file size:** {file_processor.max_file_size_mb} MB")
     
     # Main content - Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "📄 Single Upload",
         "📁 Multi Upload",
         "💾 CSV Ingestion",
@@ -303,7 +307,9 @@ def main():
         "💰 Deductible/OOP",
         "🏥 Benefit Accumulator",
         "🔍 View Duplicates",
-        "🗄️ Database Tables"
+        "🗄️ Database Tables",
+        "📚 Benefit Coverage RAG",
+        "📁 Local RAG"
     ])
     
     # Tab 1: Single File Upload
@@ -1157,6 +1163,446 @@ def main():
                 
         except Exception as e:
             st.error(f"Failed to retrieve table information: {str(e)}")
+
+    # Tab 9: Benefit Coverage RAG
+    with tab9:
+        st.header("📚 Benefit Coverage RAG Agent")
+        st.markdown("Query benefit coverage documents using cloud-based RAG with AWS Textract and Bedrock.")
+
+        st.info("""
+        **How it works:**
+        1. **Prepare**: Extract text from Textract JSON in S3 → Chunk → Embed with Bedrock Titan → Store in vector DB
+        2. **Query**: Semantic search → Rerank with Bedrock Cohere → Generate answer with Bedrock Claude
+        """)
+
+        # Mode selection
+        rag_mode = st.radio(
+            "Operation Mode",
+            ["Prepare Pipeline", "Query Documents"],
+            horizontal=True,
+            key="benefit_rag_mode"
+        )
+
+        if rag_mode == "Prepare Pipeline":
+            st.subheader("🔧 Prepare RAG Pipeline")
+            st.markdown("Prepare the RAG pipeline from AWS Textract output stored in S3.")
+
+            with st.form("prepare_benefit_rag_form"):
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    s3_bucket = st.text_input(
+                        "S3 Bucket *",
+                        value=settings.get_bucket("mba"),
+                        help="S3 bucket containing Textract output"
+                    )
+
+                with col2:
+                    textract_prefix = st.text_input(
+                        "Textract Output Prefix *",
+                        placeholder="e.g., mba/textract-output/mba/pdf/policy.pdf/job-123/",
+                        help="S3 prefix where Textract JSON files are stored"
+                    )
+
+                vector_store = st.selectbox(
+                    "Vector Store",
+                    options=["opensearch", "qdrant"],
+                    help="Choose vector database backend"
+                )
+
+                submit = st.form_submit_button("🚀 Prepare Pipeline", type="primary", use_container_width=True)
+
+            if submit:
+                if not s3_bucket or not textract_prefix:
+                    st.error("❌ S3 bucket and Textract prefix are required")
+                else:
+                    with st.spinner("Preparing RAG pipeline..."):
+                        try:
+                            # Lazy-load agent
+                            if benefit_coverage_rag_agent is None:
+                                benefit_coverage_rag_agent = BenefitCoverageRAGAgent()
+
+                            import asyncio
+                            result = asyncio.run(benefit_coverage_rag_agent.prepare_pipeline(
+                                s3_bucket=s3_bucket,
+                                textract_prefix=textract_prefix,
+                                index_name=f"{vector_store}_benefit_coverage"
+                            ))
+
+                            st.divider()
+
+                            if result.get("success"):
+                                st.success("✅ RAG Pipeline prepared successfully!")
+
+                                col1, col2, col3 = st.columns(3)
+                                col1.metric("Documents", result.get("document_count", 0))
+                                col2.metric("Chunks", result.get("chunk_count", 0))
+                                col3.metric("Vector Store", result.get("vector_store", "N/A"))
+
+                                with st.expander("📋 View Full Response"):
+                                    st.json(result)
+
+                            elif "error" in result:
+                                st.error(f"❌ Preparation Error: {result['error']}")
+                                with st.expander("📋 View Error Details"):
+                                    st.json(result)
+                            else:
+                                st.warning("⚠️ Preparation incomplete")
+                                st.json(result)
+
+                        except Exception as e:
+                            st.error(f"❌ Pipeline preparation failed: {str(e)}")
+                            logger.error(f"Benefit Coverage RAG preparation error: {str(e)}", exc_info=True)
+
+        else:  # Query Documents
+            st.subheader("🔍 Query Benefit Coverage Documents")
+            st.markdown("Ask questions about benefit coverage using RAG.")
+
+            with st.form("query_benefit_rag_form"):
+                question = st.text_area(
+                    "Your Question *",
+                    placeholder="e.g., Is massage therapy covered? What are the deductibles for PPO plans?",
+                    help="Ask any question about benefit coverage",
+                    height=100
+                )
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    top_k = st.slider(
+                        "Number of documents to retrieve",
+                        min_value=1,
+                        max_value=20,
+                        value=10,
+                        help="How many relevant chunks to retrieve"
+                    )
+
+                with col2:
+                    rerank_top_n = st.slider(
+                        "Top documents after reranking",
+                        min_value=1,
+                        max_value=10,
+                        value=5,
+                        help="How many top chunks to use for answer generation"
+                    )
+
+                submit = st.form_submit_button("🔍 Query", type="primary", use_container_width=True)
+
+            if submit:
+                if not question.strip():
+                    st.error("❌ Please enter a question")
+                else:
+                    with st.spinner("Querying documents..."):
+                        try:
+                            # Lazy-load agent
+                            if benefit_coverage_rag_agent is None:
+                                benefit_coverage_rag_agent = BenefitCoverageRAGAgent()
+
+                            import asyncio
+                            result = asyncio.run(benefit_coverage_rag_agent.query(
+                                question=question,
+                                k=rerank_top_n  # Use rerank_top_n as the final number of docs
+                            ))
+
+                            st.divider()
+
+                            if result.get("success"):
+                                st.success("✅ Query completed successfully!")
+
+                                # Display answer
+                                st.subheader("💡 Answer")
+                                st.markdown(result.get("answer", "No answer generated"))
+
+                                st.divider()
+
+                                # Display sources
+                                sources = result.get("sources", [])
+                                if sources:
+                                    st.subheader("📚 Sources")
+                                    for idx, source in enumerate(sources, 1):
+                                        with st.expander(f"Source {idx} - Page {source.get('page', 'N/A')} (Score: {source.get('score', 0):.3f})"):
+                                            st.markdown(source.get("text", "No text available"))
+                                            st.caption(f"Metadata: {source.get('metadata', {})}")
+
+                                with st.expander("📋 View Full Response"):
+                                    st.json(result)
+
+                            elif "error" in result:
+                                st.error(f"❌ Query Error: {result['error']}")
+                                with st.expander("📋 View Error Details"):
+                                    st.json(result)
+                            else:
+                                st.warning("⚠️ Query incomplete")
+                                st.json(result)
+
+                        except Exception as e:
+                            st.error(f"❌ Query failed: {str(e)}")
+                            logger.error(f"Benefit Coverage RAG query error: {str(e)}", exc_info=True)
+
+    # Tab 10: Local RAG
+    with tab10:
+        st.header("📁 Local RAG Agent")
+        st.markdown("Upload PDFs and query them using local open-source RAG (PyMuPDF, Tabula, ChromaDB).")
+
+        st.info("""
+        **How it works:**
+        1. **Upload**: Upload PDF → Extract text/tables with PyMuPDF & Tabula → Save JSON locally
+        2. **Prepare**: Load JSON → Chunk → Embed with Sentence Transformers → Store in ChromaDB
+        3. **Query**: Semantic search → Rerank with Cross-Encoder → Generate answer with Bedrock Claude
+        """)
+
+        # Mode selection
+        local_rag_mode = st.radio(
+            "Operation Mode",
+            ["Upload PDF", "Prepare Pipeline", "Query Documents"],
+            horizontal=True,
+            key="local_rag_mode"
+        )
+
+        if local_rag_mode == "Upload PDF":
+            st.subheader("📤 Upload PDF for Local Processing")
+            st.markdown("Upload a PDF file to extract text and tables locally.")
+
+            uploaded_pdf = st.file_uploader(
+                "Choose a PDF file",
+                type=["pdf"],
+                key="local_rag_pdf_upload",
+                help="Upload a benefit policy document"
+            )
+
+            if uploaded_pdf:
+                st.write(f"**Filename:** {uploaded_pdf.name}")
+                st.write(f"**Size:** {uploaded_pdf.size / 1024:.2f} KB")
+
+                if st.button("🚀 Extract Content", type="primary", use_container_width=True):
+                    with st.spinner("Extracting text and tables from PDF..."):
+                        try:
+                            # Save uploaded file to temp location
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                                tmp.write(uploaded_pdf.read())
+                                temp_pdf_path = tmp.name
+
+                            # Lazy-load agent
+                            if local_rag_agent is None:
+                                local_rag_agent = LocalRAGAgent()
+
+                            import asyncio
+                            result = asyncio.run(local_rag_agent.upload_pdf(
+                                file_path=temp_pdf_path,
+                                filename=uploaded_pdf.name,  # Pass original filename
+                                extract_now=True
+                            ))
+
+                            # Clean up temp file
+                            Path(temp_pdf_path).unlink(missing_ok=True)
+
+                            st.divider()
+
+                            if result.get("success"):
+                                st.success("✅ PDF extraction completed successfully!")
+
+                                extraction = result.get("extraction", {})
+                                col1, col2, col3 = st.columns(3)
+                                col1.metric("Pages Extracted", extraction.get("pages", 0))
+                                col2.metric("Tables Found", extraction.get("tables", 0))
+                                output_file = extraction.get("json_path", "N/A")
+                                col3.metric("Output File", output_file.split("\\")[-1] if output_file != "N/A" else "N/A")
+
+                                st.info(f"📁 Extracted data saved to: `{output_file}`")
+                                st.caption(f"**Original filename:** {result.get('file_name', 'Unknown')}")
+
+                                with st.expander("📋 View Extraction Details"):
+                                    st.json(result)
+
+                            elif "error" in result:
+                                st.error(f"❌ Extraction Error: {result['error']}")
+                                with st.expander("📋 View Error Details"):
+                                    st.json(result)
+                            else:
+                                st.warning("⚠️ Extraction incomplete")
+                                st.json(result)
+
+                        except Exception as e:
+                            st.error(f"❌ PDF extraction failed: {str(e)}")
+                            logger.error(f"Local RAG PDF extraction error: {str(e)}", exc_info=True)
+
+        elif local_rag_mode == "Prepare Pipeline":
+            st.subheader("🔧 Prepare Local RAG Pipeline")
+            st.markdown("Prepare the RAG pipeline from extracted JSON file.")
+
+            # Get list of extracted JSON files
+            data_dir = Path("data/processed")
+            if data_dir.exists():
+                json_files = list(data_dir.glob("*_extracted.json"))
+
+                if json_files:
+                    selected_json = st.selectbox(
+                        "Select Extracted JSON File",
+                        options=[f.name for f in json_files],
+                        help="Choose a previously extracted document"
+                    )
+
+                    if selected_json:
+                        json_path = data_dir / selected_json
+
+                        # Preview JSON metadata
+                        with st.expander("📊 Preview Extraction Metadata"):
+                            try:
+                                import json
+                                with open(json_path, "r", encoding="utf-8") as f:
+                                    data = json.load(f)
+
+                                col1, col2 = st.columns(2)
+                                col1.metric("Pages", len(data.get("pages", [])))
+                                col2.metric("Tables", len(data.get("tables", [])))
+
+                                st.caption(f"Source PDF: {data.get('metadata', {}).get('source_pdf', 'N/A')}")
+                            except Exception as e:
+                                st.error(f"Failed to preview: {str(e)}")
+
+                        if st.button("🚀 Prepare Pipeline", type="primary", use_container_width=True):
+                            with st.spinner("Preparing local RAG pipeline..."):
+                                try:
+                                    # Lazy-load agent
+                                    if local_rag_agent is None:
+                                        local_rag_agent = LocalRAGAgent()
+
+                                    import asyncio
+                                    result = asyncio.run(local_rag_agent.prepare_pipeline(
+                                        json_path=str(json_path)
+                                    ))
+
+                                    st.divider()
+
+                                    if result.get("success"):
+                                        st.success("✅ Local RAG Pipeline prepared successfully!")
+
+                                        col1, col2, col3 = st.columns(3)
+                                        col1.metric("Documents", result.get("doc_count", 0))
+                                        col2.metric("Chunks", result.get("chunks_count", 0))
+                                        col3.metric("Embeddings", result.get("chunks_count", 0))  # Same as chunks
+
+                                        st.info(f"📁 Collection: `{result.get('collection_name', 'N/A')}`")
+
+                                        with st.expander("📋 View Full Response"):
+                                            st.json(result)
+
+                                    elif "error" in result:
+                                        st.error(f"❌ Preparation Error: {result['error']}")
+                                        with st.expander("📋 View Error Details"):
+                                            st.json(result)
+                                    else:
+                                        st.warning("⚠️ Preparation incomplete")
+                                        st.json(result)
+
+                                except Exception as e:
+                                    st.error(f"❌ Pipeline preparation failed: {str(e)}")
+                                    logger.error(f"Local RAG preparation error: {str(e)}", exc_info=True)
+                else:
+                    st.warning("📂 No extracted JSON files found. Please upload and extract a PDF first.")
+            else:
+                st.warning(f"📂 Directory `data/processed` not found. Please upload and extract a PDF first.")
+
+        else:  # Query Documents
+            st.subheader("🔍 Query Local Documents")
+            st.markdown("Ask questions about uploaded documents using local RAG.")
+
+            with st.form("query_local_rag_form"):
+                question = st.text_area(
+                    "Your Question *",
+                    placeholder="e.g., What is the coverage for chiropractic care? Are there any visit limits?",
+                    help="Ask any question about the uploaded documents",
+                    height=100
+                )
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    top_k = st.slider(
+                        "Number of documents to retrieve",
+                        min_value=1,
+                        max_value=20,
+                        value=10,
+                        help="How many relevant chunks to retrieve",
+                        key="local_rag_top_k"
+                    )
+
+                with col2:
+                    rerank_top_n = st.slider(
+                        "Top documents after reranking",
+                        min_value=1,
+                        max_value=10,
+                        value=5,
+                        help="How many top chunks to use for answer generation",
+                        key="local_rag_rerank_top_n"
+                    )
+
+                collection_name = st.text_input(
+                    "Collection Name (Optional)",
+                    placeholder="Leave empty for default collection",
+                    help="Specify ChromaDB collection name"
+                )
+
+                submit = st.form_submit_button("🔍 Query", type="primary", use_container_width=True)
+
+            if submit:
+                if not question.strip():
+                    st.error("❌ Please enter a question")
+                else:
+                    with st.spinner("Querying local documents..."):
+                        try:
+                            # Lazy-load agent
+                            if local_rag_agent is None:
+                                local_rag_agent = LocalRAGAgent()
+
+                            import asyncio
+                            result = asyncio.run(local_rag_agent.query(
+                                question=question,
+                                collection_name=collection_name if collection_name else "local_benefit_coverage",
+                                k=rerank_top_n,  # Use rerank_top_n as final number of docs
+                                use_reranker=True
+                            ))
+
+                            st.divider()
+
+                            if result.get("success"):
+                                st.success("✅ Query completed successfully!")
+
+                                # Display answer
+                                st.subheader("💡 Answer")
+                                st.markdown(result.get("answer", "No answer generated"))
+
+                                st.divider()
+
+                                # Display sources
+                                sources = result.get("sources", [])
+                                if sources:
+                                    st.subheader("📚 Sources")
+                                    for idx, source in enumerate(sources, 1):
+                                        # Extract page from metadata
+                                        metadata = source.get("metadata", {})
+                                        page_num = metadata.get("page", "N/A")
+                                        similarity_score = source.get("similarity_score", 0)
+
+                                        with st.expander(f"Source {idx} - Page {page_num} (Score: {similarity_score:.3f})"):
+                                            st.markdown(source.get("content", "No text available"))
+                                            st.caption(f"**Metadata:** {metadata}")
+
+                                with st.expander("📋 View Full Response"):
+                                    st.json(result)
+
+                            elif "error" in result:
+                                st.error(f"❌ Query Error: {result['error']}")
+                                with st.expander("📋 View Error Details"):
+                                    st.json(result)
+                            else:
+                                st.warning("⚠️ Query incomplete")
+                                st.json(result)
+
+                        except Exception as e:
+                            st.error(f"❌ Query failed: {str(e)}")
+                            logger.error(f"Local RAG query error: {str(e)}", exc_info=True)
 
 
 if __name__ == "__main__":

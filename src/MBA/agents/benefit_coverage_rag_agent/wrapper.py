@@ -23,7 +23,7 @@ Usage:
 from typing import Dict, Any, Optional
 
 from ...core.logging_config import get_logger
-from ...core.exceptions import ConfigError, S3Error, TextractError
+from ...core.exceptions import ConfigError, UploadError, TextractError
 
 logger = get_logger(__name__)
 
@@ -222,7 +222,7 @@ class BenefitCoverageRAGAgent:
 
             return result
 
-        except S3Error as e:
+        except UploadError as e:
             logger.error(
                 f"S3 error during pipeline preparation: {e.message}",
                 extra=e.details

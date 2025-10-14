@@ -522,6 +522,7 @@ async def upload_pdf_local(params: Dict[str, Any]) -> Dict[str, Any]:
     Args:
         params: Dictionary containing:
             - file_path (str): Path to PDF file to upload
+            - filename (str, optional): Original filename to use (defaults to source filename)
             - extract_now (bool): Whether to extract immediately (default: True)
 
     Returns:
@@ -530,6 +531,8 @@ async def upload_pdf_local(params: Dict[str, Any]) -> Dict[str, Any]:
     try:
         source_path = Path(params.get("file_path"))
         extract_now = params.get("extract_now", True)
+        # Use provided filename or fallback to source filename
+        original_filename = params.get("filename", source_path.name)
 
         if not source_path.exists():
             return {"success": False, "error": f"File not found: {source_path}"}
@@ -537,8 +540,8 @@ async def upload_pdf_local(params: Dict[str, Any]) -> Dict[str, Any]:
         if source_path.suffix.lower() != '.pdf':
             return {"success": False, "error": "Only PDF files are supported"}
 
-        # Copy to uploads directory
-        dest_path = UPLOAD_DIR / source_path.name
+        # Copy to uploads directory with original filename
+        dest_path = UPLOAD_DIR / original_filename
         shutil.copy2(source_path, dest_path)
 
         logger.info(f"PDF uploaded to {dest_path}")

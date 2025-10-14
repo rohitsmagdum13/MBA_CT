@@ -22,7 +22,7 @@ from strands import tool
 
 from ...core.logging_config import get_logger
 from ...core.settings import settings
-from ...core.exceptions import S3Error, TextractError
+from ...core.exceptions import UploadError, TextractError
 
 logger = get_logger(__name__)
 
@@ -291,7 +291,7 @@ def extract_text_from_textract_s3(s3_bucket: str, textract_output_prefix: str) -
         return documents
 
     except ClientError as e:
-        raise S3Error(
+        raise UploadError(
             f"S3 error accessing Textract output: {str(e)}",
             details={"bucket": s3_bucket, "prefix": textract_output_prefix}
         )

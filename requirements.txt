@@ -22,6 +22,43 @@ streamlit
 # Template engine
 jinja2
 
+# ============================================================================
+# Local RAG Agent Dependencies (Open-Source, Privacy-Focused)
+# ============================================================================
+# These libraries enable fully local document processing and RAG without
+# external API calls (except for final LLM answer generation via Bedrock).
+# Use case: Process sensitive documents locally, development/testing without
+# cloud costs, offline document analysis.
+
+# PDF Text Extraction - PyMuPDF (fitz) for fast, accurate text extraction
+PyMuPDF>=1.23.0  # Extract text, images, and metadata from PDFs locally
+
+# PDF Table Extraction - Tabula for structured table data extraction
+tabula-py>=2.8.0  # Extract tables from PDFs into pandas DataFrames
+jpype1>=1.4.1  # Java bridge required by tabula-py
+
+# Alternative PDF Processing - pdfplumber for complex layouts and tables
+pdfplumber>=0.10.0  # Fallback for complex PDF layouts with tables
+
+# Local Embeddings - Sentence Transformers for generating vector embeddings
+sentence-transformers>=2.2.2  # Local embedding models (all-MiniLM-L6-v2, 384-dim)
+torch>=2.0.0  # PyTorch backend for Sentence Transformers
+transformers>=4.30.0  # Hugging Face transformers library
+
+# Local Vector Database - ChromaDB for storing and querying document embeddings
+chromadb>=0.4.0  # Lightweight, embedded vector database with no server setup
+
+# Local Reranking - Cross-encoder models for relevance scoring
+# Note: Uses sentence-transformers cross-encoder models (ms-marco-MiniLM-L-6-v2)
+
+# Text Processing Utilities
+nltk>=3.8.0  # Natural language processing for text chunking and tokenization
+spacy>=3.5.0  # Advanced NLP for entity recognition and text analysis (optional)
+
+# ============================================================================
+# End Local RAG Dependencies
+# ============================================================================
+
 # Development tools (optional)
 pytest
 pytest-asyncio

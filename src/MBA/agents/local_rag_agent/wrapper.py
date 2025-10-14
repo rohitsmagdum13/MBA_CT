@@ -30,12 +30,13 @@ class LocalRAGAgent:
             logger.error(f"Failed to initialize local RAG agent: {e}")
             raise RuntimeError(f"Agent initialization failed: {str(e)}")
 
-    async def upload_pdf(self, file_path: str, extract_now: bool = True) -> Dict[str, Any]:
+    async def upload_pdf(self, file_path: str, filename: Optional[str] = None, extract_now: bool = True) -> Dict[str, Any]:
         """
         Upload PDF and optionally extract content.
 
         Args:
             file_path: Path to PDF file
+            filename: Original filename to use (optional, defaults to file_path name)
             extract_now: Whether to extract immediately
 
         Returns:
@@ -47,6 +48,8 @@ class LocalRAGAgent:
             from .tools import upload_pdf_local
 
             params = {"file_path": file_path, "extract_now": extract_now}
+            if filename:
+                params["filename"] = filename
             result = await upload_pdf_local(params)
 
             logger.info(f"PDF upload completed: {result.get('file_name')}")
