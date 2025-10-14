@@ -87,11 +87,11 @@ class RDSClient:
             - Logs initialization status
         """
         # Load configuration from settings or parameters
-        self.host = host or settings.RDS_HOST
-        self.port = port or settings.RDS_PORT
-        self.database = database or settings.RDS_DATABASE
-        self.user = user or settings.RDS_USERNAME
-        self._password = password or settings.RDS_PASSWORD
+        self.host = host or settings.rds_host
+        self.port = port or settings.rds_port
+        self.database = database or settings.rds_database
+        self.user = user or settings.rds_username
+        self._password = password or settings.rds_password
         self._pool_size = pool_size or settings.rds_pool_size
         
         # Validate required parameters

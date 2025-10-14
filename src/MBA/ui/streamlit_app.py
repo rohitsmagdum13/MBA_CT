@@ -37,11 +37,14 @@ from MBA.core.exceptions import (
     DatabaseError, DataIngestionError
 )
 from MBA.core.settings import settings
-from MBA.services.s3_client import S3Client
-from MBA.services.file_utils import FileProcessor
-from MBA.services.duplicate_detector import DuplicateDetector
-from MBA.services.rds_client import RDSClient
-from MBA.services.csv_ingestor import CSVIngestor
+from MBA.services.storage.s3_client import S3Client
+from MBA.services.storage.file_processor import FileProcessor
+from MBA.services.storage.duplicate_detector import DuplicateDetector
+from MBA.services.database.client import RDSClient
+from MBA.services.ingestion.orchestrator import CSVIngestor
+from MBA.agents.member_verification_agent import MemberVerificationAgent
+from MBA.agents.deductible_oop_agent import DeductibleOOPAgent
+from MBA.agents.benefit_accumulator_agent import BenefitAccumulatorAgent
 
 # Setup logging
 setup_root_logger()
@@ -60,10 +63,10 @@ st.set_page_config(
 def initialize_services():
     """
     Initialize and cache service instances.
-    
+
     Returns:
-        Tuple: (S3Client, FileProcessor, DuplicateDetector, RDSClient, CSVIngestor)
-        
+        Tuple: (S3Client, FileProcessor, DuplicateDetector, RDSClient, CSVIngestor, MemberVerificationAgent)
+
     Side Effects:
         - Creates service instances
         - Tests connectivity
@@ -72,7 +75,7 @@ def initialize_services():
     try:
         bucket = settings.get_bucket("mba")
         prefix = settings.get_prefix("mba")
-        
+
         s3_client = S3Client(bucket=bucket, prefix=prefix)
         file_processor = FileProcessor(
             allowed_extensions={
@@ -85,10 +88,10 @@ def initialize_services():
         duplicate_detector = DuplicateDetector()
         rds_client = RDSClient()
         csv_ingestor = CSVIngestor(rds_client=rds_client)
-        
-        logger.info("All services initialized successfully")
+
+        logger.info("Core services initialized successfully")
         return s3_client, file_processor, duplicate_detector, rds_client, csv_ingestor
-        
+
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
         st.error(f"❌ Failed to initialize services: {str(e)}")
@@ -233,9 +236,14 @@ def render_ingestion_result(result: Dict[str, Any]):
 
 def main():
     """Main Streamlit application entry point."""
-    
+
     # Initialize services
     s3_client, file_processor, duplicate_detector, rds_client, csv_ingestor = initialize_services()
+    
+    # Lazy-load agents (only when tabs are accessed)
+    verification_agent = None
+    deductible_oop_agent = None
+    benefit_accumulator_agent = None
     
     # Header
     st.title("📤 MBA Upload & Ingestion Service")
@@ -287,10 +295,13 @@ def main():
         st.caption(f"**Max file size:** {file_processor.max_file_size_mb} MB")
     
     # Main content - Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📄 Single Upload",
         "📁 Multi Upload",
         "💾 CSV Ingestion",
+        "👤 Member Verification",
+        "💰 Deductible/OOP",
+        "🏥 Benefit Accumulator",
         "🔍 View Duplicates",
         "🗄️ Database Tables"
     ])
@@ -535,9 +546,515 @@ def main():
                     st.warning("No CSV files found in directory")
             else:
                 st.error(f"Directory not found: {csv_dir}")
-    
-    # Tab 4: View Duplicates
+
+    # Tab 4: Member Verification
     with tab4:
+        st.header("👤 Member Verification")
+        st.markdown("Verify member identity using AI-powered authentication with AWS Bedrock.")
+
+        # Information box
+        st.info("""
+        **How it works:**
+        1. User Request → Strands Agent → AWS Bedrock LLM
+        2. Bedrock analyzes request → verify_member Tool → RDS MySQL
+        3. SQL Query Result → JSON Response
+        """)
+
+        # Verification mode selection
+        verification_mode = st.radio(
+            "Verification Mode",
+            ["Single Member", "Batch Verification"],
+            horizontal=True
+        )
+
+        if verification_mode == "Single Member":
+            st.subheader("Verify Single Member")
+
+            # Input form
+            with st.form("single_verification_form"):
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    member_id = st.text_input(
+                        "Member ID",
+                        placeholder="e.g., M1001",
+                        help="Unique member identifier"
+                    )
+                    dob = st.date_input(
+                        "Date of Birth",
+                        value=None,
+                        help="Member's date of birth"
+                    )
+
+                with col2:
+                    name = st.text_input(
+                        "Full Name (Optional)",
+                        placeholder="e.g., John Doe",
+                        help="Member's full name for additional validation"
+                    )
+
+                st.markdown("**Note:** At least one field (Member ID or DOB) is required for verification.")
+
+                submit_button = st.form_submit_button("🔍 Verify Member", type="primary", use_container_width=True)
+
+            if submit_button:
+                # Validate at least one field is provided
+                if not member_id and not dob and not name:
+                    st.error("❌ Please provide at least one verification parameter (Member ID, DOB, or Name)")
+                else:
+                    with st.spinner("Verifying member..."):
+                        try:
+                            # Lazy-load agent
+                            if verification_agent is None:
+                                verification_agent = MemberVerificationAgent()
+                            # Build params
+                            params = {}
+                            if member_id:
+                                params["member_id"] = member_id
+                            if dob:
+                                params["dob"] = str(dob)
+                            if name:
+                                params["name"] = name
+
+                            # Call verification agent
+                            import asyncio
+                            result = asyncio.run(verification_agent.verify_member(**params))
+
+                            st.divider()
+
+                            # Display result
+                            if result.get("valid"):
+                                st.success("✅ Member Verified Successfully!")
+
+                                col1, col2, col3 = st.columns(3)
+                                col1.metric("Member ID", result.get("member_id", "N/A"))
+                                col2.metric("Name", result.get("name", "N/A"))
+                                col3.metric("Date of Birth", result.get("dob", "N/A"))
+
+                                # Show full result
+                                with st.expander("📋 View Full Response"):
+                                    st.json(result)
+
+                            elif "error" in result:
+                                st.error(f"❌ Verification Error: {result['error']}")
+
+                                with st.expander("📋 View Error Details"):
+                                    st.json(result)
+
+                            else:
+                                st.warning("⚠️ Member Not Found")
+                                st.info(result.get("message", "Authentication failed"))
+
+                                with st.expander("📋 View Response"):
+                                    st.json(result)
+
+                        except Exception as e:
+                            st.error(f"❌ Verification failed: {str(e)}")
+                            logger.error(f"Member verification error: {str(e)}", exc_info=True)
+
+        else:  # Batch Verification
+            st.subheader("Batch Member Verification")
+
+            st.markdown("Upload a CSV file or enter multiple members manually.")
+
+            # Option to upload CSV or manual entry
+            batch_mode = st.radio(
+                "Input Method",
+                ["Manual Entry", "Upload CSV"],
+                horizontal=True
+            )
+
+            if batch_mode == "Manual Entry":
+                st.markdown("**Enter member details (one per line):**")
+
+                # Text area for manual entry
+                manual_input = st.text_area(
+                    "Member Data",
+                    placeholder="M1001, 2005-05-23, Brandi Kim\nM1002, 1987-12-14, Anthony Brown",
+                    help="Format: member_id, dob, name (one member per line)",
+                    height=150
+                )
+
+                if st.button("🔍 Verify All", type="primary", use_container_width=True):
+                    if not manual_input.strip():
+                        st.error("❌ Please enter member data")
+                    else:
+                        # Parse manual input
+                        members = []
+                        lines = manual_input.strip().split("\n")
+
+                        for idx, line in enumerate(lines, 1):
+                            parts = [p.strip() for p in line.split(",")]
+                            if len(parts) >= 2:
+                                member = {"member_id": parts[0], "dob": parts[1]}
+                                if len(parts) >= 3:
+                                    member["name"] = parts[2]
+                                members.append(member)
+
+                        if not members:
+                            st.error("❌ No valid member data found")
+                        else:
+                            with st.spinner(f"Verifying {len(members)} members..."):
+                                try:
+                                    # Lazy-load agent
+                                    if verification_agent is None:
+                                        verification_agent = MemberVerificationAgent()
+                                    import asyncio
+                                    results = asyncio.run(verification_agent.verify_member_batch(members))
+
+                                    st.divider()
+                                    st.subheader("📊 Batch Verification Results")
+
+                                    # Summary metrics
+                                    verified = sum(1 for r in results if r.get("valid"))
+                                    failed = sum(1 for r in results if not r.get("valid") and "error" not in r)
+                                    errors = sum(1 for r in results if "error" in r)
+
+                                    col1, col2, col3, col4 = st.columns(4)
+                                    col1.metric("Total", len(results))
+                                    col2.metric("Verified", verified)
+                                    col3.metric("Not Found", failed)
+                                    col4.metric("Errors", errors)
+
+                                    st.divider()
+
+                                    # Display individual results
+                                    st.subheader("📝 Individual Results")
+
+                                    for idx, result in enumerate(results, 1):
+                                        if result.get("valid"):
+                                            status = "✅"
+                                            label = f"{result.get('member_id', 'Unknown')} - {result.get('name', 'N/A')}"
+                                        elif "error" in result:
+                                            status = "❌"
+                                            label = f"Member {idx} - Error"
+                                        else:
+                                            status = "⚠️"
+                                            label = f"Member {idx} - Not Found"
+
+                                        with st.expander(f"{status} {label}"):
+                                            st.json(result)
+
+                                except Exception as e:
+                                    st.error(f"❌ Batch verification failed: {str(e)}")
+                                    logger.error(f"Batch verification error: {str(e)}", exc_info=True)
+
+            else:  # Upload CSV
+                st.markdown("**Upload a CSV file with member data:**")
+
+                csv_file = st.file_uploader(
+                    "Choose CSV file",
+                    type=["csv"],
+                    help="CSV should have columns: member_id, dob, name (optional)",
+                    key="batch_verification_csv"
+                )
+
+                if csv_file:
+                    try:
+                        df = pd.read_csv(csv_file)
+
+                        st.write(f"**Loaded:** {len(df)} members")
+
+                        with st.expander("📊 Preview Data"):
+                            st.dataframe(df.head(10))
+
+                        if st.button("🔍 Verify All", type="primary", use_container_width=True):
+                            with st.spinner(f"Verifying {len(df)} members..."):
+                                try:
+                                    # Lazy-load agent
+                                    if verification_agent is None:
+                                        verification_agent = MemberVerificationAgent()
+                                    
+                                    # Convert DataFrame to list of dicts
+                                    members = df.to_dict('records')
+
+                                    # Clean up the data
+                                    for member in members:
+                                        # Convert any NaN to None
+                                        member = {k: (None if pd.isna(v) else v) for k, v in member.items()}
+
+                                    import asyncio
+                                    results = asyncio.run(verification_agent.verify_member_batch(members))
+
+                                    st.divider()
+                                    st.subheader("📊 Batch Verification Results")
+
+                                    # Summary metrics
+                                    verified = sum(1 for r in results if r.get("valid"))
+                                    failed = sum(1 for r in results if not r.get("valid") and "error" not in r)
+                                    errors = sum(1 for r in results if "error" in r)
+
+                                    col1, col2, col3, col4 = st.columns(4)
+                                    col1.metric("Total", len(results))
+                                    col2.metric("Verified", verified)
+                                    col3.metric("Not Found", failed)
+                                    col4.metric("Errors", errors)
+
+                                    st.divider()
+
+                                    # Create results DataFrame
+                                    results_df = pd.DataFrame(results)
+                                    st.subheader("📝 Results Table")
+                                    st.dataframe(results_df, use_container_width=True)
+
+                                    # Download results
+                                    csv_results = results_df.to_csv(index=False)
+                                    st.download_button(
+                                        label="📥 Download Results CSV",
+                                        data=csv_results,
+                                        file_name=f"verification_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                        mime="text/csv"
+                                    )
+
+                                except Exception as e:
+                                    st.error(f"❌ Batch verification failed: {str(e)}")
+                                    logger.error(f"CSV batch verification error: {str(e)}", exc_info=True)
+
+                    except Exception as e:
+                        st.error(f"❌ Failed to load CSV: {str(e)}")
+
+    # Tab 5: Deductible/OOP Lookup
+    with tab5:
+        st.header("💰 Deductible & Out-of-Pocket Lookup")
+        st.markdown("Query member deductible and OOP information using AWS Bedrock AI.")
+
+        st.info("""
+        **How it works:**
+        1. User Request → AWS Bedrock LLM → get_deductible_oop Tool
+        2. Tool queries RDS MySQL deductibles_oop table
+        3. Returns structured deductible/OOP data for all plan types and networks
+        """)
+
+        with st.form("deductible_oop_form"):
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                member_id = st.text_input(
+                    "Member ID *",
+                    placeholder="e.g., M1001",
+                    help="Required: Member identifier"
+                )
+
+            with col2:
+                plan_type = st.selectbox(
+                    "Plan Type (Optional)",
+                    options=["", "individual", "family"],
+                    help="Filter by plan type"
+                )
+
+            with col3:
+                network = st.selectbox(
+                    "Network (Optional)",
+                    options=["", "ppo", "par", "oon"],
+                    help="Filter by network level"
+                )
+
+            submit = st.form_submit_button("🔍 Lookup", type="primary", use_container_width=True)
+
+        if submit:
+            if not member_id:
+                st.error("❌ Member ID is required")
+            else:
+                with st.spinner("Querying deductible/OOP data..."):
+                    try:
+                        # Lazy-load agent
+                        if deductible_oop_agent is None:
+                            deductible_oop_agent = DeductibleOOPAgent()
+                        import asyncio
+                        result = asyncio.run(deductible_oop_agent.get_deductible_oop(
+                            member_id=member_id,
+                            plan_type=plan_type if plan_type else None,
+                            network=network if network else None
+                        ))
+
+                        st.divider()
+
+                        if result.get("found"):
+                            st.success(f"✅ Found deductible/OOP data for {result['member_id']}")
+
+                            # Individual Plans
+                            st.subheader("👤 Individual Plans")
+                            ind_data = result.get("individual", {})
+
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                st.markdown("**PPO**")
+                                ppo = ind_data.get("ppo", {})
+                                st.metric("Deductible", ppo.get("deductible", "N/A"))
+                                st.metric("Met", ppo.get("deductible_met", "N/A"))
+                                st.metric("Remaining", ppo.get("deductible_remaining", "N/A"))
+                                st.metric("OOP Limit", ppo.get("oop", "N/A"))
+                                st.metric("OOP Met", ppo.get("oop_met", "N/A"))
+                                st.metric("OOP Remaining", ppo.get("oop_remaining", "N/A"))
+
+                            with col2:
+                                st.markdown("**PAR**")
+                                par = ind_data.get("par", {})
+                                st.metric("Deductible", par.get("deductible", "N/A"))
+                                st.metric("Met", par.get("deductible_met", "N/A"))
+                                st.metric("Remaining", par.get("deductible_remaining", "N/A"))
+                                st.metric("OOP Limit", par.get("oop", "N/A"))
+                                st.metric("OOP Met", par.get("oop_met", "N/A"))
+                                st.metric("OOP Remaining", par.get("oop_remaining", "N/A"))
+
+                            with col3:
+                                st.markdown("**OON**")
+                                oon = ind_data.get("oon", {})
+                                st.metric("Deductible", oon.get("deductible", "N/A"))
+                                st.metric("Met", oon.get("deductible_met", "N/A"))
+                                st.metric("Remaining", oon.get("deductible_remaining", "N/A"))
+                                st.metric("OOP Limit", oon.get("oop", "N/A"))
+                                st.metric("OOP Met", oon.get("oop_met", "N/A"))
+                                st.metric("OOP Remaining", oon.get("oop_remaining", "N/A"))
+
+                            st.divider()
+
+                            # Family Plans
+                            st.subheader("👨‍👩‍👧‍👦 Family Plans")
+                            fam_data = result.get("family", {})
+
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                st.markdown("**PPO**")
+                                ppo = fam_data.get("ppo", {})
+                                st.metric("Deductible", ppo.get("deductible", "N/A"))
+                                st.metric("Met", ppo.get("deductible_met", "N/A"))
+                                st.metric("Remaining", ppo.get("deductible_remaining", "N/A"))
+                                st.metric("OOP Limit", ppo.get("oop", "N/A"))
+                                st.metric("OOP Met", ppo.get("oop_met", "N/A"))
+                                st.metric("OOP Remaining", ppo.get("oop_remaining", "N/A"))
+
+                            with col2:
+                                st.markdown("**PAR**")
+                                par = fam_data.get("par", {})
+                                st.metric("Deductible", par.get("deductible", "N/A"))
+                                st.metric("Met", par.get("deductible_met", "N/A"))
+                                st.metric("Remaining", par.get("deductible_remaining", "N/A"))
+                                st.metric("OOP Limit", par.get("oop", "N/A"))
+                                st.metric("OOP Met", par.get("oop_met", "N/A"))
+                                st.metric("OOP Remaining", par.get("oop_remaining", "N/A"))
+
+                            with col3:
+                                st.markdown("**OON**")
+                                oon = fam_data.get("oon", {})
+                                st.metric("Deductible", oon.get("deductible", "N/A"))
+                                st.metric("Met", oon.get("deductible_met", "N/A"))
+                                st.metric("Remaining", oon.get("deductible_remaining", "N/A"))
+                                st.metric("OOP Limit", oon.get("oop", "N/A"))
+                                st.metric("OOP Met", oon.get("oop_met", "N/A"))
+                                st.metric("OOP Remaining", oon.get("oop_remaining", "N/A"))
+
+                            with st.expander("📋 View Full Response"):
+                                st.json(result)
+
+                        elif "error" in result:
+                            st.error(f"❌ Lookup Error: {result['error']}")
+                            with st.expander("📋 View Error Details"):
+                                st.json(result)
+                        else:
+                            st.warning("⚠️ No data found")
+                            st.info(result.get("message", "No deductible/OOP data found"))
+
+                    except Exception as e:
+                        st.error(f"❌ Lookup failed: {str(e)}")
+                        logger.error(f"Deductible/OOP lookup error: {str(e)}", exc_info=True)
+
+    # Tab 6: Benefit Accumulator Lookup
+    with tab6:
+        st.header("🏥 Benefit Accumulator Lookup")
+        st.markdown("Query member benefit usage information using AWS Bedrock AI.")
+
+        st.info("""
+        **How it works:**
+        1. User Request → AWS Bedrock LLM → get_benefit_accumulator Tool
+        2. Tool queries RDS MySQL benefit_accumulator table
+        3. Returns benefit usage data with limits, used amounts, and remaining balances
+        """)
+
+        with st.form("benefit_accumulator_form"):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                member_id = st.text_input(
+                    "Member ID *",
+                    placeholder="e.g., M1001",
+                    help="Required: Member identifier"
+                )
+
+            with col2:
+                service = st.text_input(
+                    "Service (Optional)",
+                    placeholder="e.g., Massage Therapy",
+                    help="Filter by specific service name"
+                )
+
+            submit = st.form_submit_button("🔍 Lookup", type="primary", use_container_width=True)
+
+        if submit:
+            if not member_id:
+                st.error("❌ Member ID is required")
+            else:
+                with st.spinner("Querying benefit accumulator data..."):
+                    try:
+                        # Lazy-load agent
+                        if benefit_accumulator_agent is None:
+                            benefit_accumulator_agent = BenefitAccumulatorAgent()
+                        import asyncio
+                        result = asyncio.run(benefit_accumulator_agent.get_benefit_accumulator(
+                            member_id=member_id,
+                            service=service if service else None
+                        ))
+
+                        st.divider()
+
+                        if result.get("found"):
+                            benefits = result.get("benefits", [])
+                            st.success(f"✅ Found {len(benefits)} benefit(s) for {result['member_id']}")
+
+                            # Display benefits as table
+                            if benefits:
+                                df_benefits = pd.DataFrame(benefits)
+                                st.dataframe(
+                                    df_benefits,
+                                    use_container_width=True,
+                                    column_config={
+                                        "service": st.column_config.TextColumn("Service", width="medium"),
+                                        "allowed_limit": st.column_config.TextColumn("Allowed Limit", width="medium"),
+                                        "used": st.column_config.NumberColumn("Used", width="small"),
+                                        "remaining": st.column_config.NumberColumn("Remaining", width="small")
+                                    }
+                                )
+
+                                st.divider()
+
+                                # Individual benefit cards
+                                st.subheader("📊 Benefit Details")
+                                for benefit in benefits:
+                                    with st.expander(f"🏥 {benefit['service']}"):
+                                        col1, col2, col3 = st.columns(3)
+                                        col1.metric("Allowed Limit", benefit['allowed_limit'])
+                                        col2.metric("Used", benefit['used'])
+                                        col3.metric("Remaining", benefit['remaining'])
+
+                            with st.expander("📋 View Full Response"):
+                                st.json(result)
+
+                        elif "error" in result:
+                            st.error(f"❌ Lookup Error: {result['error']}")
+                            with st.expander("📋 View Error Details"):
+                                st.json(result)
+                        else:
+                            st.warning("⚠️ No benefits found")
+                            st.info(result.get("message", "No benefit accumulator data found"))
+
+                    except Exception as e:
+                        st.error(f"❌ Lookup failed: {str(e)}")
+                        logger.error(f"Benefit accumulator lookup error: {str(e)}", exc_info=True)
+
+    # Tab 7: View Duplicates
+    with tab7:
         st.header("Duplicate Detection Cache")
         st.markdown("Browse all detected duplicate file groups.")
         
@@ -557,9 +1074,9 @@ def main():
                         st.code(Path(path).name, language=None)
                     
                     st.caption(f"Full hash: `{hash_val}`")
-    
-    # Tab 5: Database Tables
-    with tab5:
+
+    # Tab 8: Database Tables
+    with tab8:
         st.header("RDS Database Tables")
         st.markdown("View table schemas and statistics.")
         

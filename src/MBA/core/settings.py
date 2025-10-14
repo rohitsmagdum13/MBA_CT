@@ -39,7 +39,10 @@ class Settings(BaseSettings):
             aws_secret_access_key (Optional[str]): AWS secret key
             aws_default_region (str): Default AWS region (default: "us-east-1")
             aws_profile (Optional[str]): Named AWS profile to use
-            
+
+        AWS Bedrock Configuration:
+            bedrock_model_id (str): Bedrock model ID for LLM inference
+
         S3 Configuration:
             s3_bucket_mba (str): S3 bucket for MBA data files
             s3_prefix_mba (str): Key prefix for MBA files (must end with /)
@@ -73,6 +76,9 @@ class Settings(BaseSettings):
     aws_default_region: str = "us-east-1"
     aws_profile: Optional[str] = None
 
+    # ---------------- AWS Bedrock Configuration ----------------
+    bedrock_model_id: str = "arn:aws:bedrock:us-east-1:859065147353:inference-profile/us.anthropic.claude-3-sonnet-20240229-v1:0"
+
     # ---------------- S3 Buckets ----------------
     s3_bucket_mba: str = "mb-assistant-bucket"
 
@@ -92,12 +98,12 @@ class Settings(BaseSettings):
     textract_backoff_max_sec: float = 12.0
 
     # ---------------- RDS Configuration ----------------
-    RDS_HOST: str = "mba-mysql-db.conaisaskh5d.us-east-1.rds.amazonaws.com"
-    RDS_PORT: int = 3306
-    RDS_DATABASE: str = "mba_db"
-    RDS_USERNAME: str = "admin"
-    RDS_PASSWORD: str = "Admin12345"
-    RDS_PARAMS: str = "charset=utf8mb4"
+    rds_host: str = "mba-mysql-db.conaisaskh5d.us-east-1.rds.amazonaws.com"
+    rds_port: int = 3306
+    rds_database: str = "mba_db"
+    rds_username: str = "admin"
+    rds_password: str = "Admin12345"
+    rds_params: str = "charset=utf8mb4"
     
     # Connection pooling
     rds_pool_size: int = 5

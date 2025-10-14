@@ -39,11 +39,12 @@ from MBA.core.exceptions import (
     DatabaseError, DataIngestionError
 )
 from MBA.core.settings import settings
-from MBA.services.s3_client import S3Client
-from MBA.services.file_utils import FileProcessor
-from MBA.services.duplicate_detector import DuplicateDetector
-from MBA.services.csv_ingestor import CSVIngestor
-from MBA.services.rds_client import RDSClient
+from MBA.services.storage.s3_client import S3Client
+from MBA.services.storage.file_processor import FileProcessor
+from MBA.services.storage.duplicate_detector import DuplicateDetector
+from MBA.services.ingestion.orchestrator import CSVIngestor
+from MBA.services.database.client import RDSClient
+from MBA.agents import MemberVerificationAgent, DeductibleOOPAgent, BenefitAccumulatorAgent
 
 # Setup logging
 setup_root_logger()
@@ -62,6 +63,9 @@ file_processor: Optional[FileProcessor] = None
 duplicate_detector: Optional[DuplicateDetector] = None
 rds_client: Optional[RDSClient] = None
 csv_ingestor: Optional[CSVIngestor] = None
+verification_agent: Optional[MemberVerificationAgent] = None
+deductible_oop_agent: Optional[DeductibleOOPAgent] = None
+benefit_accumulator_agent: Optional[BenefitAccumulatorAgent] = None
 
 # Job tracking (in-memory for simplicity)
 ingestion_jobs: Dict[str, Dict[str, Any]] = {}
@@ -127,6 +131,31 @@ class HealthResponse(BaseModel):
     database_connected: bool
 
 
+class VerificationRequest(BaseModel):
+    """Request model for member verification."""
+    member_id: Optional[str] = None
+    dob: Optional[str] = None
+    name: Optional[str] = None
+
+
+class BatchVerificationRequest(BaseModel):
+    """Request model for batch member verification."""
+    members: List[Dict[str, Any]]
+
+
+class DeductibleOOPRequest(BaseModel):
+    """Request model for deductible/OOP lookup."""
+    member_id: str
+    plan_type: Optional[str] = None
+    network: Optional[str] = None
+
+
+class BenefitAccumulatorRequest(BaseModel):
+    """Request model for benefit accumulator lookup."""
+    member_id: str
+    service: Optional[str] = None
+
+
 # ============== Startup/Shutdown ==============
 
 @app.on_event("startup")
@@ -139,33 +168,38 @@ async def startup_event():
         - Tests database connectivity
         - Logs initialization status
     """
-    global s3_client, file_processor, duplicate_detector, rds_client, csv_ingestor
-    
+    global s3_client, file_processor, duplicate_detector, rds_client, csv_ingestor, verification_agent, deductible_oop_agent, benefit_accumulator_agent
+
     try:
         # Initialize S3 client
         bucket = settings.get_bucket("mba")
         prefix = settings.get_prefix("mba")
         s3_client = S3Client(bucket=bucket, prefix=prefix)
-        
+
         # Initialize file processor
         file_processor = FileProcessor(
             allowed_extensions={
-                ".pdf", ".doc", ".docx", 
+                ".pdf", ".doc", ".docx",
                 ".xls", ".xlsx", ".xlsm",
                 ".txt", ".csv", ".json", ".md"
             },
             max_file_size_mb=100
         )
-        
+
         # Initialize duplicate detector
         duplicate_detector = DuplicateDetector()
-        
+
         # Initialize RDS client
         rds_client = RDSClient()
-        
+
         # Initialize CSV ingestor
         csv_ingestor = CSVIngestor(rds_client=rds_client)
-        
+
+        # Initialize AI agents
+        verification_agent = MemberVerificationAgent()
+        deductible_oop_agent = DeductibleOOPAgent()
+        benefit_accumulator_agent = BenefitAccumulatorAgent()
+
         logger.info("All services initialized successfully")
         
     except Exception as e:
@@ -202,7 +236,10 @@ async def health_check():
         "file_processor": "initialized" if file_processor else "not_initialized",
         "duplicate_detector": "initialized" if duplicate_detector else "not_initialized",
         "rds_client": "initialized" if rds_client else "not_initialized",
-        "csv_ingestor": "initialized" if csv_ingestor else "not_initialized"
+        "csv_ingestor": "initialized" if csv_ingestor else "not_initialized",
+        "verification_agent": "initialized" if verification_agent else "not_initialized",
+        "deductible_oop_agent": "initialized" if deductible_oop_agent else "not_initialized",
+        "benefit_accumulator_agent": "initialized" if benefit_accumulator_agent else "not_initialized"
     }
     
     # Test database connectivity
@@ -623,6 +660,156 @@ async def get_ingestion_status(job_id: str):
         results=job.get("results"),
         error=job.get("error")
     )
+
+
+# ============== Member Verification Endpoints ==============
+
+@app.post("/verify/member", tags=["Verification"])
+async def verify_member(request: VerificationRequest):
+    """Verify a single member identity."""
+    if not verification_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Verification service not initialized"
+        )
+    
+    try:
+        result = await verification_agent.verify_member(
+            member_id=request.member_id,
+            dob=request.dob,
+            name=request.name
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
+
+
+@app.post("/verify/batch", tags=["Verification"])
+async def verify_members_batch(request: BatchVerificationRequest):
+    """Verify multiple members in batch."""
+    if not verification_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Verification service not initialized"
+        )
+
+    try:
+        results = await verification_agent.verify_member_batch(request.members)
+        return {"results": results, "total": len(results)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch verification failed: {str(e)}")
+
+
+# ============== Deductible/OOP Endpoints ==============
+
+@app.post("/lookup/deductible-oop", tags=["Lookup"])
+async def lookup_deductible_oop(request: DeductibleOOPRequest):
+    """
+    Lookup deductible and out-of-pocket information for a member.
+
+    This endpoint uses AWS Bedrock LLM to process the request and query
+    the deductibles_oop table in RDS MySQL.
+
+    Flow:
+    1. User Request
+    2. AWS Bedrock LLM Invocation
+    3. Bedrock LLM Analyzes Request
+    4. Bedrock Calls get_deductible_oop tool
+    5. Tool Executes SQL Query against RDS MySQL
+    6. Database Returns Results
+    7. Tool Returns Structured JSON
+    8. Bedrock Formats Final Response
+    9. Parse Agent Response
+    10. Return to User
+
+    Args:
+        request: DeductibleOOPRequest with member_id and optional filters
+
+    Returns:
+        JSON response with deductible/OOP information
+
+    Example Request:
+        ```json
+        {
+            "member_id": "M1001",
+            "plan_type": "individual",
+            "network": "ppo"
+        }
+        ```
+    """
+    if not deductible_oop_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Deductible/OOP lookup service not initialized"
+        )
+
+    try:
+        result = await deductible_oop_agent.get_deductible_oop(
+            member_id=request.member_id,
+            plan_type=request.plan_type,
+            network=request.network
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Deductible/OOP lookup failed: {str(e)}")
+
+
+# ============== Benefit Accumulator Endpoints ==============
+
+@app.post("/lookup/benefit-accumulator", tags=["Lookup"])
+async def lookup_benefit_accumulator(request: BenefitAccumulatorRequest):
+    """
+    Lookup benefit accumulator information for a member.
+
+    This endpoint uses AWS Bedrock LLM to process the request and query
+    the benefit_accumulator table in RDS MySQL.
+
+    Flow:
+    1. User Request
+    2. AWS Bedrock LLM Invocation
+    3. Bedrock LLM Analyzes Request
+    4. Bedrock Calls get_benefit_accumulator tool
+    5. Tool Executes SQL Query against RDS MySQL
+    6. Database Returns Results
+    7. Tool Returns Structured JSON
+    8. Bedrock Formats Final Response
+    9. Parse Agent Response
+    10. Return to User
+
+    Args:
+        request: BenefitAccumulatorRequest with member_id and optional service filter
+
+    Returns:
+        JSON response with benefit accumulator information
+
+    Example Request:
+        ```json
+        {
+            "member_id": "M1001",
+            "service": "Massage Therapy"
+        }
+        ```
+    """
+    if not benefit_accumulator_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Benefit accumulator lookup service not initialized"
+        )
+
+    try:
+        result = await benefit_accumulator_agent.get_benefit_accumulator(
+            member_id=request.member_id,
+            service=request.service
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Benefit accumulator lookup failed: {str(e)}")
 
 
 # ============== Server Runner ==============
