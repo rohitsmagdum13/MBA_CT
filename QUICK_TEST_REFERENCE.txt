@@ -1,0 +1,187 @@
+================================================================================
+                    ORCHESTRATION AGENT - QUICK TEST REFERENCE
+================================================================================
+
+🎯 RECOMMENDED: Interactive Testing
+────────────────────────────────────────────────────────────────────────────────
+python interactive_orchestration_test.py
+
+Type queries, see results instantly. Commands:
+  • examples  - Show example queries
+  • json      - Toggle JSON output
+  • history   - Show conversation history
+  • quit      - Exit
+
+
+📋 SAMPLE TEST QUERIES BY INTENT
+────────────────────────────────────────────────────────────────────────────────
+
+1️⃣  MEMBER VERIFICATION
+   • Is member M1001 active?
+   • Verify member M1002
+   • Check if member M1003 is eligible
+
+2️⃣  DEDUCTIBLE/OOP
+   • What is the deductible for member M1001?
+   • Show OOP information for M1002
+   • What's the out of pocket maximum for M1003?
+
+3️⃣  BENEFIT ACCUMULATOR
+   • How many massage visits has member M1001 used?
+   • Show chiropractic usage for M1002
+   • Massage visits for M1001
+
+4️⃣  BENEFIT COVERAGE RAG
+   • What is covered under massage therapy?
+   • Is acupuncture covered?
+   • What are the coverage limits for chiropractic care?
+
+5️⃣  LOCAL RAG
+   • What does the uploaded document say about benefits?
+   • Search uploaded files for coverage information
+
+6️⃣  GENERAL INQUIRY
+   • What can you do?
+   • Help me
+   • Hello
+
+
+🧪 QUICK TESTING OPTIONS
+────────────────────────────────────────────────────────────────────────────────
+
+Option 1: Interactive (Manual Testing)
+  python interactive_orchestration_test.py
+
+Option 2: Quick Auto Test (5 queries)
+  python test_all_orchestration_queries.py --quick
+
+Option 3: Full Auto Test (100+ queries)
+  python test_all_orchestration_queries.py
+
+Option 4: Simple Verification
+  python test_orchestration_fix.py
+
+Option 5: API Testing
+  # Terminal 1: Start API
+  python -m src.MBA.microservices.api
+
+  # Terminal 2: Test
+  curl -X POST "http://localhost:8000/orchestrate/query" \
+    -H "Content-Type: application/json" \
+    -d '{"query": "Is member M1001 active?"}'
+
+Option 6: Streamlit UI
+  streamlit run src/MBA/ui/streamlit_app.py
+  # Then go to Tab 11: AI Orchestration
+
+
+📊 EXPECTED RESPONSE FORMAT
+────────────────────────────────────────────────────────────────────────────────
+{
+  "success": true/false,
+  "intent": "member_verification|deductible_oop|benefit_accumulator|...",
+  "agent": "MemberVerificationAgent|DeductibleOOPAgent|...",
+  "confidence": 0.0-1.0,
+  "result": { /* agent-specific data */ },
+  "reasoning": "Why this intent was chosen",
+  "extracted_entities": { "member_id": "M1001", ... },
+  "query": "Original query"
+}
+
+
+✅ SUCCESS CRITERIA
+────────────────────────────────────────────────────────────────────────────────
+✅ No "Failed to parse agent response" errors
+✅ Correct intent classification
+✅ Entity extraction (member IDs, services)
+✅ Correct agent routing
+✅ Results properly captured
+✅ Graceful error handling
+✅ Reasonable confidence scores (0.4-1.0)
+
+
+🔍 VALID TEST DATA
+────────────────────────────────────────────────────────────────────────────────
+Member IDs:
+  M1001 - Brandi Kim (DOB: 2005-05-23)
+  M1002 - Dawn Brown (DOB: 1961-04-08)
+  M1003 - Kathleen Clark (DOB: 1964-04-13)
+  M1004 - Jeffrey Hill (DOB: 1999-05-14)
+  M1005 - Justin Moore (DOB: 1969-10-20)
+
+Service Types:
+  massage, massage therapy
+  chiropractic, chiropractor
+  acupuncture
+  physical therapy, PT
+
+
+📚 DOCUMENTATION FILES
+────────────────────────────────────────────────────────────────────────────────
+• TESTING_GUIDE.md          - Complete testing guide
+• TEST_QUERIES.md           - All test queries organized by intent
+• ORCHESTRATION_FIX.md      - Technical fix documentation
+• QUICK_TEST_REFERENCE.txt  - This file
+
+
+🎯 ONE-LINER TESTS (Copy & Paste)
+────────────────────────────────────────────────────────────────────────────────
+
+Test 1: Member Verification
+  Is member M1001 active?
+
+Test 2: Deductible/OOP
+  What is the deductible for member M1001?
+
+Test 3: Benefit Accumulator
+  How many massage visits has member M1001 used?
+
+Test 4: Coverage Question
+  What is covered under massage therapy?
+
+Test 5: General Help
+  What can you do?
+
+Test 6: Edge Case (Missing Info)
+  What is the deductible?
+
+Test 7: Complex Natural Language
+  Could you please check how many massage therapy sessions member M1003 has used?
+
+
+🚨 TROUBLESHOOTING
+────────────────────────────────────────────────────────────────────────────────
+
+Problem: "Failed to parse agent response"
+Solution: ✅ FIXED - Global cache workaround implemented
+
+Problem: Intent misclassified
+Check: Review reasoning field, check confidence score
+
+Problem: Missing entities
+Check: extracted_entities field, verify query format
+
+Problem: Agent not executing
+Check: Logs for tool execution (analyze_query, route_to_agent)
+
+Problem: Database errors
+Check: Member ID exists in database, service type is valid
+
+
+💡 QUICK START
+────────────────────────────────────────────────────────────────────────────────
+
+1. Run interactive console:
+   python interactive_orchestration_test.py
+
+2. Type a query:
+   >>> Is member M1001 active?
+
+3. See the result with intent, agent, confidence, and result data
+
+4. Try more queries or type 'examples' for suggestions
+
+
+================================================================================
+                              HAPPY TESTING! 🚀
+================================================================================

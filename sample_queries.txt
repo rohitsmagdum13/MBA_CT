@@ -1,0 +1,20 @@
+Is member M1001 active?
+Verify member M1002
+Check if member M1003 is eligible
+What is the deductible for member M1001?
+Show OOP information for M1002
+What's the out of pocket maximum for M1003?
+How many massage visits has member M1001 used?
+Show chiropractic usage for M1002
+Massage visits for M1001
+What is covered under massage therapy?
+Is acupuncture covered?
+What are the coverage limits for chiropractic care?
+What can you do?
+Help me
+Hello
+What is the deductible?
+How many visits?
+Is member M1001 active and what's their deductible?
+Could you please check how many massage therapy sessions member M1003 has used so far this year?
+Tell me about member M1001

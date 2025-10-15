@@ -131,6 +131,72 @@ class OrchestrationAgent:
 
         return "\n".join(prompt_parts)
 
+    def _parse_cached_results(self, cached_results: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Parse tool results from cache.
+
+        WORKAROUND: Due to Strands AgentResult not capturing tool results properly,
+        we retrieve results directly from the global cache that tools populate.
+
+        Args:
+            cached_results: Dictionary with tool results from cache
+
+        Returns:
+            Dict[str, Any]: Orchestration result
+        """
+        try:
+            analysis_result = cached_results.get('analyze_query')
+            routing_result = cached_results.get('route_to_agent')
+            format_result = cached_results.get('format_response')
+
+            logger.info(f"Parsing cached results - have analysis: {bool(analysis_result)}, routing: {bool(routing_result)}, format: {bool(format_result)}")
+
+            # Build orchestration result from cached tool results
+            if routing_result:
+                logger.info("Building result from cached routing_result")
+                result = {
+                    "success": routing_result.get("success", False),
+                    "intent": routing_result.get("intent", "unknown"),
+                    "agent": routing_result.get("agent", "Unknown"),
+                    "result": routing_result.get("result", {}),
+                }
+
+                if analysis_result:
+                    result.update({
+                        "confidence": analysis_result.get("confidence", 0.0),
+                        "reasoning": analysis_result.get("reasoning", ""),
+                        "extracted_entities": analysis_result.get("extracted_entities", {})
+                    })
+
+                if format_result and format_result.get("success"):
+                    result["formatted_response"] = format_result.get("formatted_response", {})
+
+                # Add error if present
+                if "error" in routing_result:
+                    result["error"] = routing_result["error"]
+
+                return result
+
+            # If no routing result, check if we have analysis result
+            if analysis_result:
+                logger.warning("Have analysis result but no routing result")
+                return {
+                    "success": False,
+                    "error": "Query analysis succeeded but routing failed",
+                    "intent": analysis_result.get("intent", "unknown"),
+                    "confidence": analysis_result.get("confidence", 0.0),
+                    "reasoning": analysis_result.get("reasoning", ""),
+                    "extracted_entities": analysis_result.get("extracted_entities", {})
+                }
+
+            # Fallback: no cached results found
+            logger.warning("No cached tool results found")
+            return {"error": "No tool results captured", "success": False}
+
+        except Exception as e:
+            logger.error(f"Error parsing cached results: {str(e)}", exc_info=True)
+            return {"error": f"Cached results parsing failed: {str(e)}", "success": False}
+
     def _parse_agent_response(self, response: Any) -> Dict[str, Any]:
         """
         Parse the Strands agent response to extract orchestration result.
@@ -145,70 +211,105 @@ class OrchestrationAgent:
             Dict[str, Any]: Orchestration result
         """
         try:
-            # Check if agent used tools
-            if hasattr(response, 'tool_calls') and response.tool_calls:
-                # Extract results from tool calls
-                analysis_result = None
-                routing_result = None
-                format_result = None
+            # Strands agent stores tool execution history in the response
+            # Check for execution_history or history attribute
+            analysis_result = None
+            routing_result = None
+            format_result = None
 
-                for tool_call in response.tool_calls:
-                    if hasattr(tool_call, 'name') and hasattr(tool_call, 'result'):
-                        if tool_call.name == 'analyze_query':
-                            analysis_result = tool_call.result
-                        elif tool_call.name == 'route_to_agent':
-                            routing_result = tool_call.result
-                        elif tool_call.name == 'format_response':
-                            format_result = tool_call.result
+            # Try to access execution history from different possible attributes
+            execution_history = None
+            if hasattr(response, 'execution_history'):
+                execution_history = response.execution_history
+            elif hasattr(response, 'history'):
+                execution_history = response.history
+            elif hasattr(response, 'tool_calls'):
+                execution_history = response.tool_calls
+            elif hasattr(response, '_history'):
+                execution_history = response._history
 
-                # Build orchestration result from tool results
-                if routing_result:
-                    result = {
-                        "success": routing_result.get("success", False),
-                        "intent": routing_result.get("intent", "unknown"),
-                        "agent": routing_result.get("agent", "Unknown"),
-                        "result": routing_result.get("result", {}),
-                    }
+            # If we have execution history, extract tool results
+            if execution_history:
+                logger.info(f"Found execution history with {len(execution_history)} entries")
 
-                    if analysis_result:
-                        result.update({
-                            "confidence": analysis_result.get("confidence", 0.0),
-                            "reasoning": analysis_result.get("reasoning", ""),
-                            "extracted_entities": analysis_result.get("extracted_entities", {})
-                        })
+                for entry in execution_history:
+                    # Handle different entry structures
+                    tool_name = None
+                    tool_result = None
 
-                    if format_result and format_result.get("success"):
-                        result["formatted_response"] = format_result.get("formatted_response", {})
+                    if isinstance(entry, dict):
+                        tool_name = entry.get('name') or entry.get('tool_name')
+                        tool_result = entry.get('result') or entry.get('output')
+                    elif hasattr(entry, 'name'):
+                        tool_name = entry.name
+                        tool_result = getattr(entry, 'result', None) or getattr(entry, 'output', None)
 
-                    # Add error if present
-                    if "error" in routing_result:
-                        result["error"] = routing_result["error"]
+                    if tool_name and tool_result:
+                        logger.info(f"Processing tool result from: {tool_name}")
+                        if tool_name == 'analyze_query':
+                            analysis_result = tool_result if isinstance(tool_result, dict) else {}
+                        elif tool_name == 'route_to_agent':
+                            routing_result = tool_result if isinstance(tool_result, dict) else {}
+                        elif tool_name == 'format_response':
+                            format_result = tool_result if isinstance(tool_result, dict) else {}
 
-                    return result
+            # Build orchestration result from tool results
+            if routing_result:
+                logger.info("Building result from routing_result")
+                result = {
+                    "success": routing_result.get("success", False),
+                    "intent": routing_result.get("intent", "unknown"),
+                    "agent": routing_result.get("agent", "Unknown"),
+                    "result": routing_result.get("result", {}),
+                }
 
-            # If no tool calls or couldn't parse them, check for content
+                if analysis_result:
+                    result.update({
+                        "confidence": analysis_result.get("confidence", 0.0),
+                        "reasoning": analysis_result.get("reasoning", ""),
+                        "extracted_entities": analysis_result.get("extracted_entities", {})
+                    })
+
+                if format_result and format_result.get("success"):
+                    result["formatted_response"] = format_result.get("formatted_response", {})
+
+                # Add error if present
+                if "error" in routing_result:
+                    result["error"] = routing_result["error"]
+
+                return result
+
+            # If no tool results found, check for content in the response
             if hasattr(response, 'content'):
                 import json
+                content_str = str(response.content)
+
+                # Try to parse as JSON
                 try:
-                    return json.loads(response.content)
+                    parsed = json.loads(content_str)
+                    if isinstance(parsed, dict) and 'success' in parsed:
+                        logger.info("Successfully parsed response content as JSON")
+                        return parsed
                 except (json.JSONDecodeError, TypeError):
-                    # Text response - treat as successful but unparsed
-                    content_str = str(response.content)
-                    logger.info(f"Agent returned text response instead of tool results: {content_str[:200]}...")
-                    return {
-                        "success": True,
-                        "intent": "general_inquiry",
-                        "agent": "OrchestrationAgent",
-                        "result": {
-                            "message": content_str
-                        },
-                        "confidence": 0.8,
-                        "reasoning": "Agent provided text response",
-                        "extracted_entities": {}
-                    }
+                    pass
+
+                # Text response - treat as successful with message
+                logger.info(f"Agent returned text response: {content_str[:200]}...")
+                return {
+                    "success": True,
+                    "intent": "general_inquiry",
+                    "agent": "OrchestrationAgent",
+                    "result": {
+                        "message": content_str
+                    },
+                    "confidence": 0.8,
+                    "reasoning": "Agent provided text response",
+                    "extracted_entities": {}
+                }
 
             # Fallback: return error
-            logger.warning("Could not parse agent response - no content or tool calls")
+            logger.warning("Could not parse agent response - no content or tool results found")
+            logger.warning(f"Response type: {type(response)}, attributes: {dir(response)}")
             return {"error": "Failed to parse agent response", "success": False}
 
         except Exception as e:
@@ -313,8 +414,19 @@ class OrchestrationAgent:
 
             logger.info("Strands agent invocation completed")
 
-            # Parse the agent's response
-            result = self._parse_agent_response(response)
+            # WORKAROUND: Due to Strands AgentResult not capturing tool results properly,
+            # we retrieve results from our cache instead of parsing the response object
+            from .tools import get_tool_results_cache, clear_tool_results_cache
+
+            # Get cached tool results
+            cached_results = get_tool_results_cache()
+            logger.info(f"Retrieved cached tool results: {list(cached_results.keys())}")
+
+            # Parse the results from cache
+            result = self._parse_cached_results(cached_results)
+
+            # Clear cache for next invocation
+            clear_tool_results_cache()
 
             # Ensure query is in result
             if "query" not in result:

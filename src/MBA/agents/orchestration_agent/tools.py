@@ -13,6 +13,25 @@ from ...core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Global cache for tool results (workaround for Strands not capturing results)
+_tool_results_cache: Dict[str, Any] = {}
+
+
+def get_tool_results_cache() -> Dict[str, Any]:
+    """
+    Get the current tool results cache.
+
+    Returns:
+        Dictionary with tool results
+    """
+    return _tool_results_cache.copy()
+
+
+def clear_tool_results_cache():
+    """Clear the tool results cache."""
+    global _tool_results_cache
+    _tool_results_cache = {}
+
 
 def extract_member_id(query: str) -> Optional[str]:
     """
@@ -264,16 +283,21 @@ async def analyze_query(params: Dict[str, Any]) -> Dict[str, Any]:
             extra={"intent": intent, "agent": agent, "entities": extracted_entities}
         )
 
+        # Store result in cache
+        _tool_results_cache['analyze_query'] = result
+
         return result
 
     except Exception as e:
         logger.error(f"Query analysis failed: {str(e)}", exc_info=True)
-        return {
+        error_result = {
             "success": False,
             "error": f"Query analysis failed: {str(e)}",
             "intent": "general_inquiry",
             "confidence": 0.0
         }
+        _tool_results_cache['analyze_query'] = error_result
+        return error_result
 
 
 @tool
@@ -322,12 +346,14 @@ async def route_to_agent(params: Dict[str, Any]) -> Dict[str, Any]:
             name = extracted_entities.get("name")
 
             if not member_id and not dob and not name:
-                return {
+                error_result = {
                     "success": False,
                     "error": "Missing required information. Please provide member ID, date of birth, or name.",
                     "agent": agent_name,
                     "intent": intent
                 }
+                _tool_results_cache['route_to_agent'] = error_result
+                return error_result
 
             agent = MemberVerificationAgent()
             result = await agent.verify_member(
@@ -336,45 +362,53 @@ async def route_to_agent(params: Dict[str, Any]) -> Dict[str, Any]:
                 name=name
             )
 
-            return {
+            routing_result = {
                 "success": result.get("valid", False) if "valid" in result else not ("error" in result),
                 "agent": agent_name,
                 "intent": intent,
                 "result": result
             }
+            _tool_results_cache['route_to_agent'] = routing_result
+            return routing_result
 
         elif intent == "deductible_oop":
             member_id = extracted_entities.get("member_id")
 
             if not member_id:
-                return {
+                error_result = {
                     "success": False,
                     "error": "Member ID is required for deductible/OOP lookup. Please provide a member ID (e.g., M1001).",
                     "agent": agent_name,
                     "intent": intent
                 }
+                _tool_results_cache['route_to_agent'] = error_result
+                return error_result
 
             agent = DeductibleOOPAgent()
             result = await agent.get_deductible_oop(member_id=member_id)
 
-            return {
+            routing_result = {
                 "success": result.get("found", False),
                 "agent": agent_name,
                 "intent": intent,
                 "result": result
             }
+            _tool_results_cache['route_to_agent'] = routing_result
+            return routing_result
 
         elif intent == "benefit_accumulator":
             member_id = extracted_entities.get("member_id")
             service_type = extracted_entities.get("service_type")
 
             if not member_id:
-                return {
+                error_result = {
                     "success": False,
                     "error": "Member ID is required for benefit accumulator lookup. Please provide a member ID (e.g., M1001).",
                     "agent": agent_name,
                     "intent": intent
                 }
+                _tool_results_cache['route_to_agent'] = error_result
+                return error_result
 
             agent = BenefitAccumulatorAgent()
             result = await agent.get_benefit_accumulator(
@@ -382,38 +416,44 @@ async def route_to_agent(params: Dict[str, Any]) -> Dict[str, Any]:
                 service=service_type  # Parameter name is 'service' not 'service_type'
             )
 
-            return {
+            routing_result = {
                 "success": result.get("found", False),
                 "agent": agent_name,
                 "intent": intent,
                 "result": result
             }
+            _tool_results_cache['route_to_agent'] = routing_result
+            return routing_result
 
         elif intent == "benefit_coverage_rag":
             agent = BenefitCoverageRAGAgent()
             result = await agent.query(question=query, k=5)
 
-            return {
+            routing_result = {
                 "success": "answer" in result and not result.get("error"),
                 "agent": agent_name,
                 "intent": intent,
                 "result": result
             }
+            _tool_results_cache['route_to_agent'] = routing_result
+            return routing_result
 
         elif intent == "local_rag":
             agent = LocalRAGAgent()
             result = await agent.query(question=query, k=5)
 
-            return {
+            routing_result = {
                 "success": "answer" in result and not result.get("error"),
                 "agent": agent_name,
                 "intent": intent,
                 "result": result
             }
+            _tool_results_cache['route_to_agent'] = routing_result
+            return routing_result
 
         elif intent == "general_inquiry":
             # Handle general inquiries directly
-            return {
+            routing_result = {
                 "success": True,
                 "agent": "OrchestrationAgent",
                 "intent": intent,
@@ -427,23 +467,29 @@ async def route_to_agent(params: Dict[str, Any]) -> Dict[str, Any]:
                               "What would you like to know?"
                 }
             }
+            _tool_results_cache['route_to_agent'] = routing_result
+            return routing_result
 
         else:
-            return {
+            error_result = {
                 "success": False,
                 "error": f"Unsupported intent: {intent}",
                 "agent": agent_name,
                 "intent": intent
             }
+            _tool_results_cache['route_to_agent'] = error_result
+            return error_result
 
     except Exception as e:
         logger.error(f"Agent routing failed: {str(e)}", exc_info=True)
-        return {
+        error_result = {
             "success": False,
             "error": f"Agent routing failed: {str(e)}",
             "agent": params.get("agent", "Unknown"),
             "intent": params.get("intent", "unknown")
         }
+        _tool_results_cache['route_to_agent'] = error_result
+        return error_result
 
 
 @tool
@@ -533,14 +579,18 @@ async def format_response(params: Dict[str, Any]) -> Dict[str, Any]:
                 "details": agent_result
             }
 
-        return {
+        format_result = {
             "success": True,
             "formatted_response": formatted
         }
+        _tool_results_cache['format_response'] = format_result
+        return format_result
 
     except Exception as e:
         logger.error(f"Response formatting failed: {str(e)}", exc_info=True)
-        return {
+        error_result = {
             "success": False,
             "error": f"Response formatting failed: {str(e)}"
         }
+        _tool_results_cache['format_response'] = error_result
+        return error_result
