@@ -47,6 +47,7 @@ from MBA.agents.deductible_oop_agent import DeductibleOOPAgent
 from MBA.agents.benefit_accumulator_agent import BenefitAccumulatorAgent
 from MBA.agents.benefit_coverage_rag_agent import BenefitCoverageRAGAgent
 from MBA.agents.local_rag_agent import LocalRAGAgent
+from MBA.agents.orchestration_agent import OrchestrationAgent
 
 # Setup logging
 setup_root_logger()
@@ -248,6 +249,7 @@ def main():
     benefit_accumulator_agent = None
     benefit_coverage_rag_agent = None
     local_rag_agent = None
+    orchestration_agent = None
     
     # Header
     st.title("📤 MBA Upload & Ingestion Service")
@@ -299,7 +301,7 @@ def main():
         st.caption(f"**Max file size:** {file_processor.max_file_size_mb} MB")
     
     # Main content - Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
         "📄 Single Upload",
         "📁 Multi Upload",
         "💾 CSV Ingestion",
@@ -309,7 +311,8 @@ def main():
         "🔍 View Duplicates",
         "🗄️ Database Tables",
         "📚 Benefit Coverage RAG",
-        "📁 Local RAG"
+        "📁 Local RAG",
+        "🎯 AI Orchestration"
     ])
     
     # Tab 1: Single File Upload
@@ -1603,6 +1606,399 @@ def main():
                         except Exception as e:
                             st.error(f"❌ Query failed: {str(e)}")
                             logger.error(f"Local RAG query error: {str(e)}", exc_info=True)
+
+    # Tab 11: AI Orchestration
+    with tab11:
+        st.header("🎯 AI-Powered Orchestration Agent")
+        st.markdown("Intelligent multi-agent routing powered by AWS Bedrock Claude Sonnet 4.5")
+
+        st.info("""
+        **How it works:**
+        1. **Analyze**: AI analyzes your natural language query
+        2. **Classify**: Identifies intent (member verification, deductible lookup, etc.)
+        3. **Extract**: Extracts entities (member IDs, service types, etc.)
+        4. **Route**: Automatically routes to the appropriate specialized agent
+        5. **Execute**: Runs the agent workflow and returns results
+
+        **Available Agents:**
+        - 👤 Member Verification
+        - 💰 Deductible/OOP Lookup
+        - 🏥 Benefit Accumulator
+        - 📚 Benefit Coverage RAG
+        - 📁 Local RAG
+        """)
+
+        # Mode selection
+        orch_mode = st.radio(
+            "Operation Mode",
+            ["Single Query", "Batch Queries", "Conversation History"],
+            horizontal=True,
+            key="orchestration_mode"
+        )
+
+        if orch_mode == "Single Query":
+            st.subheader("🔍 Process Single Query")
+            st.markdown("Ask any question in natural language - the AI will route it to the right agent!")
+
+            with st.form("orchestration_single_form"):
+                # Query input
+                query = st.text_area(
+                    "Your Question *",
+                    placeholder="Examples:\n- Is member M1001 active?\n- What is the deductible for member M1234?\n- How many massage visits has member M5678 used?\n- Is acupuncture covered under the plan?",
+                    help="Ask any question - the AI will understand and route it appropriately",
+                    height=120,
+                    key="orch_single_query"
+                )
+
+                # Options
+                col1, col2 = st.columns(2)
+                with col1:
+                    preserve_history = st.checkbox(
+                        "Preserve conversation history",
+                        value=False,
+                        help="Maintain query history for this session"
+                    )
+
+                with col2:
+                    show_reasoning = st.checkbox(
+                        "Show AI reasoning",
+                        value=True,
+                        help="Display intent classification and entity extraction"
+                    )
+
+                submit = st.form_submit_button("🚀 Process Query", type="primary", use_container_width=True)
+
+            if submit:
+                if not query.strip():
+                    st.error("❌ Please enter a query")
+                else:
+                    with st.spinner("🤖 AI is analyzing your query and routing to appropriate agent..."):
+                        try:
+                            # Lazy-load orchestration agent
+                            if orchestration_agent is None:
+                                orchestration_agent = OrchestrationAgent()
+
+                            import asyncio
+                            result = asyncio.run(orchestration_agent.process_query(
+                                query=query,
+                                context={},
+                                preserve_history=preserve_history
+                            ))
+
+                            st.divider()
+
+                            # Display results
+                            if result.get("success"):
+                                st.success(f"✅ Query processed successfully by **{result.get('agent', 'Unknown')}**")
+
+                                # Show AI reasoning if enabled
+                                if show_reasoning:
+                                    with st.expander("🧠 AI Reasoning & Intent Classification", expanded=True):
+                                        col1, col2, col3 = st.columns(3)
+                                        col1.metric("Intent", result.get("intent", "Unknown"))
+                                        col2.metric("Confidence", f"{result.get('confidence', 0):.0%}")
+                                        col3.metric("Routed To", result.get("agent", "Unknown"))
+
+                                        st.markdown("**Classification Reasoning:**")
+                                        st.info(result.get("reasoning", "No reasoning provided"))
+
+                                        # Show extracted entities
+                                        entities = result.get("extracted_entities", {})
+                                        if entities:
+                                            st.markdown("**Extracted Entities:**")
+                                            st.json(entities)
+
+                                st.divider()
+
+                                # Display agent result based on intent
+                                intent = result.get("intent")
+                                agent_result = result.get("result", {})
+
+                                st.subheader("📊 Agent Response")
+
+                                if intent == "member_verification":
+                                    if agent_result.get("valid"):
+                                        st.success("✅ Member Verified Successfully!")
+                                        col1, col2, col3 = st.columns(3)
+                                        col1.metric("Member ID", agent_result.get("member_id", "N/A"))
+                                        col2.metric("Name", agent_result.get("name", "N/A"))
+                                        col3.metric("DOB", agent_result.get("dob", "N/A"))
+                                    else:
+                                        st.warning("⚠️ Member Not Found")
+                                        st.info(agent_result.get("message", "Verification failed"))
+
+                                elif intent == "deductible_oop":
+                                    if agent_result.get("found"):
+                                        st.success(f"💰 Deductible/OOP Data for {agent_result['member_id']}")
+
+                                        # Show summary metrics
+                                        ind_ppo = agent_result.get("individual", {}).get("ppo", {})
+                                        col1, col2, col3, col4 = st.columns(4)
+                                        col1.metric("Deductible", ind_ppo.get("deductible", "N/A"))
+                                        col2.metric("Deductible Met", ind_ppo.get("deductible_met", "N/A"))
+                                        col3.metric("OOP Max", ind_ppo.get("oop", "N/A"))
+                                        col4.metric("OOP Met", ind_ppo.get("oop_met", "N/A"))
+                                    else:
+                                        st.warning("⚠️ No deductible/OOP data found")
+
+                                elif intent == "benefit_accumulator":
+                                    if agent_result.get("found"):
+                                        benefits = agent_result.get("benefits", [])
+                                        st.success(f"📊 Found {len(benefits)} Benefit(s)")
+
+                                        if benefits:
+                                            df = pd.DataFrame(benefits)
+                                            st.dataframe(df, use_container_width=True)
+                                    else:
+                                        st.warning("⚠️ No benefit data found")
+
+                                elif intent in ["benefit_coverage_rag", "local_rag"]:
+                                    if "answer" in agent_result:
+                                        st.markdown("**Answer:**")
+                                        st.markdown(agent_result.get("answer"))
+
+                                        sources = agent_result.get("sources", [])
+                                        if sources:
+                                            with st.expander(f"📚 View {len(sources)} Source(s)"):
+                                                for idx, source in enumerate(sources, 1):
+                                                    st.markdown(f"**Source {idx}:**")
+                                                    st.text(source.get("text", source.get("content", "No text"))[:200] + "...")
+                                    else:
+                                        st.error(agent_result.get("error", "Query failed"))
+
+                                elif intent == "general_inquiry":
+                                    st.info(agent_result.get("message", "General inquiry processed"))
+
+                                # Show full response
+                                with st.expander("📋 View Full Response"):
+                                    st.json(result)
+
+                            elif "error" in result:
+                                st.error(f"❌ Orchestration Error: {result['error']}")
+
+                                if show_reasoning:
+                                    with st.expander("🧠 AI Classification Details"):
+                                        st.info(f"**Intent:** {result.get('intent', 'Unknown')}")
+                                        st.info(f"**Confidence:** {result.get('confidence', 0):.0%}")
+
+                                with st.expander("📋 View Error Details"):
+                                    st.json(result)
+                            else:
+                                st.warning("⚠️ Query processing incomplete")
+                                st.json(result)
+
+                        except Exception as e:
+                            st.error(f"❌ Orchestration failed: {str(e)}")
+                            logger.error(f"Orchestration error: {str(e)}", exc_info=True)
+
+        elif orch_mode == "Batch Queries":
+            st.subheader("📦 Process Batch Queries")
+            st.markdown("Process multiple queries simultaneously with intelligent routing")
+
+            # Batch input method
+            batch_method = st.radio(
+                "Input Method",
+                ["Manual Entry", "Upload CSV"],
+                horizontal=True,
+                key="batch_method"
+            )
+
+            if batch_method == "Manual Entry":
+                with st.form("orchestration_batch_form"):
+                    queries_text = st.text_area(
+                        "Enter Queries (one per line) *",
+                        placeholder="Is member M1001 active?\nWhat is the deductible for member M1234?\nHow many massage visits has member M5678 used?\nIs acupuncture covered?",
+                        help="Enter one query per line",
+                        height=150
+                    )
+
+                    submit = st.form_submit_button("🚀 Process All Queries", type="primary", use_container_width=True)
+
+                if submit:
+                    queries = [q.strip() for q in queries_text.split("\n") if q.strip()]
+
+                    if not queries:
+                        st.error("❌ Please enter at least one query")
+                    else:
+                        with st.spinner(f"🤖 Processing {len(queries)} queries..."):
+                            try:
+                                # Lazy-load orchestration agent
+                                if orchestration_agent is None:
+                                    orchestration_agent = OrchestrationAgent()
+
+                                import asyncio
+                                results = asyncio.run(orchestration_agent.process_batch(
+                                    queries=queries,
+                                    context={}
+                                ))
+
+                                st.divider()
+                                st.subheader("📊 Batch Processing Results")
+
+                                # Summary metrics
+                                successful = sum(1 for r in results if r.get("success"))
+                                failed = len(results) - successful
+
+                                # Intent distribution
+                                intent_counts = {}
+                                for r in results:
+                                    intent = r.get("intent", "unknown")
+                                    intent_counts[intent] = intent_counts.get(intent, 0) + 1
+
+                                col1, col2, col3 = st.columns(3)
+                                col1.metric("Total Queries", len(results))
+                                col2.metric("Successful", successful)
+                                col3.metric("Failed", failed)
+
+                                # Intent distribution chart
+                                st.markdown("**Intent Distribution:**")
+                                intent_df = pd.DataFrame(
+                                    list(intent_counts.items()),
+                                    columns=["Intent", "Count"]
+                                )
+                                st.bar_chart(intent_df.set_index("Intent"))
+
+                                st.divider()
+
+                                # Individual results
+                                st.subheader("📝 Individual Results")
+                                for idx, result in enumerate(results, 1):
+                                    query = queries[idx-1]
+                                    status_icon = "✅" if result.get("success") else "❌"
+
+                                    with st.expander(f"{status_icon} Query {idx}: {query[:60]}..."):
+                                        col1, col2 = st.columns(2)
+                                        col1.metric("Intent", result.get("intent", "Unknown"))
+                                        col2.metric("Agent", result.get("agent", "Unknown"))
+
+                                        st.json(result)
+
+                            except Exception as e:
+                                st.error(f"❌ Batch processing failed: {str(e)}")
+                                logger.error(f"Batch orchestration error: {str(e)}", exc_info=True)
+
+            else:  # Upload CSV
+                st.markdown("Upload a CSV file with queries. CSV should have a 'query' column.")
+
+                csv_file = st.file_uploader(
+                    "Choose CSV file",
+                    type=["csv"],
+                    key="batch_orch_csv"
+                )
+
+                if csv_file:
+                    try:
+                        df = pd.read_csv(csv_file)
+
+                        if "query" not in df.columns:
+                            st.error("❌ CSV must have a 'query' column")
+                        else:
+                            st.write(f"**Loaded:** {len(df)} queries")
+
+                            with st.expander("📊 Preview Queries"):
+                                st.dataframe(df.head(10))
+
+                            if st.button("🚀 Process All Queries", type="primary", use_container_width=True):
+                                queries = df["query"].tolist()
+
+                                with st.spinner(f"🤖 Processing {len(queries)} queries..."):
+                                    try:
+                                        # Lazy-load orchestration agent
+                                        if orchestration_agent is None:
+                                            orchestration_agent = OrchestrationAgent()
+
+                                        import asyncio
+                                        results = asyncio.run(orchestration_agent.process_batch(
+                                            queries=queries,
+                                            context={}
+                                        ))
+
+                                        st.divider()
+                                        st.subheader("📊 Batch Processing Results")
+
+                                        # Add results to dataframe
+                                        df["intent"] = [r.get("intent") for r in results]
+                                        df["agent"] = [r.get("agent") for r in results]
+                                        df["success"] = [r.get("success") for r in results]
+                                        df["confidence"] = [r.get("confidence") for r in results]
+
+                                        # Summary
+                                        successful = df["success"].sum()
+                                        col1, col2, col3 = st.columns(3)
+                                        col1.metric("Total", len(df))
+                                        col2.metric("Successful", successful)
+                                        col3.metric("Failed", len(df) - successful)
+
+                                        # Show results table
+                                        st.dataframe(df, use_container_width=True)
+
+                                        # Download results
+                                        csv_results = df.to_csv(index=False)
+                                        st.download_button(
+                                            label="📥 Download Results CSV",
+                                            data=csv_results,
+                                            file_name=f"orchestration_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                            mime="text/csv"
+                                        )
+
+                                    except Exception as e:
+                                        st.error(f"❌ Batch processing failed: {str(e)}")
+                                        logger.error(f"CSV batch orchestration error: {str(e)}", exc_info=True)
+
+                    except Exception as e:
+                        st.error(f"❌ Failed to load CSV: {str(e)}")
+
+        else:  # Conversation History
+            st.subheader("💬 Conversation History")
+            st.markdown("View and manage conversation history for this session")
+
+            # Get history button
+            if st.button("🔍 View History", type="primary"):
+                try:
+                    # Lazy-load orchestration agent
+                    if orchestration_agent is None:
+                        orchestration_agent = OrchestrationAgent()
+
+                    history = orchestration_agent.get_conversation_history()
+
+                    if not history:
+                        st.info("📭 No conversation history yet. Enable 'Preserve conversation history' when processing queries.")
+                    else:
+                        st.success(f"📜 Found {len(history)} interactions")
+
+                        # Display as table
+                        df_history = pd.DataFrame(history)
+                        st.dataframe(df_history, use_container_width=True)
+
+                        st.divider()
+
+                        # Individual interactions
+                        st.subheader("💬 Detailed History")
+                        for idx, interaction in enumerate(history, 1):
+                            status_icon = "✅" if interaction.get("success") else "❌"
+
+                            with st.expander(f"{status_icon} Interaction {idx}: {interaction.get('query', '')[:60]}..."):
+                                col1, col2, col3 = st.columns(3)
+                                col1.metric("Intent", interaction.get("intent", "Unknown"))
+                                col2.metric("Confidence", f"{interaction.get('confidence', 0):.0%}")
+                                col3.metric("Agent", interaction.get("agent", "Unknown"))
+
+                except Exception as e:
+                    st.error(f"❌ Failed to retrieve history: {str(e)}")
+
+            # Clear history button
+            st.divider()
+            if st.button("🗑️ Clear History", type="secondary"):
+                try:
+                    if orchestration_agent is None:
+                        orchestration_agent = OrchestrationAgent()
+
+                    orchestration_agent.clear_conversation_history()
+                    st.success("✅ Conversation history cleared!")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"❌ Failed to clear history: {str(e)}")
 
 
 if __name__ == "__main__":

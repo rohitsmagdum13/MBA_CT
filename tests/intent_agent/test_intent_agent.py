@@ -4,7 +4,7 @@ Test script for Intent Identification Agent.
 This script tests the intent classification agent with various sample queries
 to verify it correctly identifies intents and extracts entities.
 
-Run with: python test_intent_agent.py
+Run with: python -m pytest tests/intent_agent/test_intent_agent.py
 """
 
 import asyncio
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from MBA.agents import IntentIdentificationAgent
 

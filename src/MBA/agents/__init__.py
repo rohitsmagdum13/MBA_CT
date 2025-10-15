@@ -76,6 +76,7 @@ from .benefit_accumulator_agent import (
 from .benefit_coverage_rag_agent import BenefitCoverageRAGAgent
 from .local_rag_agent import LocalRAGAgent
 from .intent_identification_agent import IntentIdentificationAgent
+from .orchestration_agent import OrchestrationAgent
 
 __all__ = [
     "MemberVerificationAgent",
@@ -84,6 +85,7 @@ __all__ = [
     "BenefitCoverageRAGAgent",
     "LocalRAGAgent",
     "IntentIdentificationAgent",
+    "OrchestrationAgent",
     "verification_agent",
     "deductible_oop_agent",
     "benefit_accumulator_agent",
@@ -92,4 +94,4 @@ __all__ = [
     "get_benefit_accumulator"
 ]
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"

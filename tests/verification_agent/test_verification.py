@@ -5,7 +5,7 @@ Run this script while the API server is running to test the verification endpoin
 
 Usage:
     1. Start the API server: uv run python -m uvicorn MBA.microservices.api:app --reload
-    2. Run this test: uv run python test_verification.py
+    2. Run this test: python tests/verification_agent/test_verification.py
 """
 
 import requests

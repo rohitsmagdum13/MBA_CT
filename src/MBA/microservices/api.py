@@ -44,7 +44,7 @@ from MBA.services.storage.file_processor import FileProcessor
 from MBA.services.storage.duplicate_detector import DuplicateDetector
 from MBA.services.ingestion.orchestrator import CSVIngestor
 from MBA.services.database.client import RDSClient
-from MBA.agents import MemberVerificationAgent, DeductibleOOPAgent, BenefitAccumulatorAgent, BenefitCoverageRAGAgent
+from MBA.agents import MemberVerificationAgent, DeductibleOOPAgent, BenefitAccumulatorAgent, BenefitCoverageRAGAgent, IntentIdentificationAgent, OrchestrationAgent
 
 # Setup logging
 setup_root_logger()
@@ -67,6 +67,8 @@ verification_agent: Optional[MemberVerificationAgent] = None
 deductible_oop_agent: Optional[DeductibleOOPAgent] = None
 benefit_accumulator_agent: Optional[BenefitAccumulatorAgent] = None
 benefit_coverage_rag_agent: Optional[BenefitCoverageRAGAgent] = None
+intent_identification_agent: Optional[IntentIdentificationAgent] = None
+orchestration_agent: Optional[OrchestrationAgent] = None
 
 # Job tracking (in-memory for simplicity)
 ingestion_jobs: Dict[str, Dict[str, Any]] = {}
@@ -173,6 +175,31 @@ class RAGQueryRequest(BaseModel):
     k: int = 5
 
 
+class IntentIdentificationRequest(BaseModel):
+    """Request model for intent identification."""
+    query: str
+    context: Optional[Dict[str, Any]] = None
+
+
+class BatchIntentIdentificationRequest(BaseModel):
+    """Request model for batch intent identification."""
+    queries: List[str]
+    context: Optional[Dict[str, Any]] = None
+
+
+class OrchestrationRequest(BaseModel):
+    """Request model for orchestration query processing."""
+    query: str
+    context: Optional[Dict[str, Any]] = None
+    preserve_history: bool = False
+
+
+class BatchOrchestrationRequest(BaseModel):
+    """Request model for batch orchestration."""
+    queries: List[str]
+    context: Optional[Dict[str, Any]] = None
+
+
 # ============== Startup/Shutdown ==============
 
 @app.on_event("startup")
@@ -185,7 +212,7 @@ async def startup_event():
         - Tests database connectivity
         - Logs initialization status
     """
-    global s3_client, file_processor, duplicate_detector, rds_client, csv_ingestor, verification_agent, deductible_oop_agent, benefit_accumulator_agent, benefit_coverage_rag_agent
+    global s3_client, file_processor, duplicate_detector, rds_client, csv_ingestor, verification_agent, deductible_oop_agent, benefit_accumulator_agent, benefit_coverage_rag_agent, intent_identification_agent, orchestration_agent
 
     try:
         # Initialize S3 client
@@ -217,6 +244,8 @@ async def startup_event():
         deductible_oop_agent = DeductibleOOPAgent()
         benefit_accumulator_agent = BenefitAccumulatorAgent()
         benefit_coverage_rag_agent = BenefitCoverageRAGAgent()
+        intent_identification_agent = IntentIdentificationAgent()
+        orchestration_agent = OrchestrationAgent()
 
         logger.info("All services initialized successfully")
         
@@ -258,7 +287,9 @@ async def health_check():
         "verification_agent": "initialized" if verification_agent else "not_initialized",
         "deductible_oop_agent": "initialized" if deductible_oop_agent else "not_initialized",
         "benefit_accumulator_agent": "initialized" if benefit_accumulator_agent else "not_initialized",
-        "benefit_coverage_rag_agent": "initialized" if benefit_coverage_rag_agent else "not_initialized"
+        "benefit_coverage_rag_agent": "initialized" if benefit_coverage_rag_agent else "not_initialized",
+        "intent_identification_agent": "initialized" if intent_identification_agent else "not_initialized",
+        "orchestration_agent": "initialized" if orchestration_agent else "not_initialized"
     }
     
     # Test database connectivity
@@ -961,6 +992,551 @@ async def query_benefit_coverage(request: RAGQueryRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"RAG query failed: {str(e)}")
+
+
+# ============== Intent Identification Endpoints ==============
+
+@app.post("/intent/identify", tags=["Intent"])
+async def identify_intent(request: IntentIdentificationRequest):
+    """
+    Identify user intent from query for intelligent routing.
+
+    This endpoint analyzes user queries and classifies them into appropriate
+    intent categories for routing to the correct agent/service.
+
+    Flow:
+    1. Receive user query
+    2. Pattern-based pre-classification (fast)
+    3. Entity extraction (member ID, service type, query type)
+    4. Confidence scoring
+    5. Intent classification
+    6. Return classification results with routing suggestions
+
+    Supported Intents:
+    - member_verification: Verify member eligibility and status
+    - deductible_oop: Query deductible and out-of-pocket information
+    - benefit_accumulator: Check benefit accumulation and service limits
+    - benefit_coverage_rag: Answer benefit coverage policy questions
+    - local_rag: Query uploaded benefit documents
+    - general_inquiry: Handle greetings and general questions
+
+    Args:
+        request: IntentIdentificationRequest with query and optional context
+
+    Returns:
+        JSON response with intent classification results
+
+    Example Request:
+        ```json
+        {
+            "query": "Is member M1001 active?",
+            "context": {}
+        }
+        ```
+
+    Example Response:
+        ```json
+        {
+            "success": true,
+            "intent": "member_verification",
+            "confidence": 0.95,
+            "reasoning": "Detected member ID: M1001. Pattern matches: 2 for member_verification",
+            "extracted_entities": {
+                "member_id": "M1001",
+                "query_type": "status"
+            },
+            "suggested_agent": "MemberVerificationAgent",
+            "fallback_intent": "general_inquiry",
+            "pattern_matches": {
+                "member_verification": 2,
+                "deductible_oop": 0,
+                "benefit_accumulator": 0,
+                "benefit_coverage_rag": 0,
+                "local_rag": 0,
+                "general_inquiry": 0
+            },
+            "query": "Is member M1001 active?"
+        }
+        ```
+    """
+    if not intent_identification_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Intent identification service not initialized"
+        )
+
+    try:
+        result = await intent_identification_agent.identify(
+            query=request.query,
+            context=request.context
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Intent identification failed: {str(e)}")
+
+
+@app.post("/intent/identify-batch", tags=["Intent"])
+async def identify_intent_batch(request: BatchIntentIdentificationRequest):
+    """
+    Identify intents for multiple queries in batch.
+
+    This endpoint processes multiple user queries and returns intent
+    classifications for each one. Useful for analyzing conversation
+    history or processing bulk queries.
+
+    Args:
+        request: BatchIntentIdentificationRequest with list of queries
+
+    Returns:
+        JSON response with list of classification results
+
+    Example Request:
+        ```json
+        {
+            "queries": [
+                "Is member M1001 active?",
+                "What is the deductible for member M1234?",
+                "How many massage visits has member M5678 used?"
+            ],
+            "context": {}
+        }
+        ```
+
+    Example Response:
+        ```json
+        {
+            "results": [
+                {
+                    "success": true,
+                    "intent": "member_verification",
+                    "confidence": 0.95,
+                    ...
+                },
+                {
+                    "success": true,
+                    "intent": "deductible_oop",
+                    "confidence": 0.90,
+                    ...
+                },
+                {
+                    "success": true,
+                    "intent": "benefit_accumulator",
+                    "confidence": 0.98,
+                    ...
+                }
+            ],
+            "total": 3
+        }
+        ```
+    """
+    if not intent_identification_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Intent identification service not initialized"
+        )
+
+    try:
+        results = await intent_identification_agent.classify_batch(
+            queries=request.queries,
+            context=request.context
+        )
+        return {"results": results, "total": len(results)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch intent identification failed: {str(e)}")
+
+
+@app.get("/intent/supported", tags=["Intent"])
+async def get_supported_intents():
+    """
+    Get list of supported intent categories.
+
+    Returns the available intent codes and their corresponding
+    agent mappings for reference.
+
+    Returns:
+        JSON response with intent codes and agent mapping
+
+    Example Response:
+        ```json
+        {
+            "intents": [
+                "member_verification",
+                "deductible_oop",
+                "benefit_accumulator",
+                "benefit_coverage_rag",
+                "local_rag",
+                "general_inquiry"
+            ],
+            "agent_mapping": {
+                "member_verification": "MemberVerificationAgent",
+                "deductible_oop": "DeductibleOOPAgent",
+                "benefit_accumulator": "BenefitAccumulatorAgent",
+                "benefit_coverage_rag": "BenefitCoverageRAGAgent",
+                "local_rag": "LocalRAGAgent",
+                "general_inquiry": "None"
+            }
+        }
+        ```
+    """
+    if not intent_identification_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Intent identification service not initialized"
+        )
+
+    try:
+        intents = intent_identification_agent.get_supported_intents()
+        mapping = intent_identification_agent.get_agent_mapping()
+        return {"intents": intents, "agent_mapping": mapping}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve supported intents: {str(e)}")
+
+
+# ============== Orchestration Endpoints ==============
+
+@app.post("/orchestrate/query", tags=["Orchestration"])
+async def orchestrate_query(request: OrchestrationRequest):
+    """
+    Process a user query through intelligent multi-agent orchestration.
+
+    This is the main orchestration endpoint that provides intelligent routing
+    and delegation across all MBA system agents. It automatically:
+    1. Identifies the intent of the user's query
+    2. Routes to the appropriate specialized agent
+    3. Executes the agent workflow
+    4. Returns a unified response with full context
+
+    This endpoint is ideal for:
+    - Building conversational interfaces
+    - Creating chatbots or virtual assistants
+    - Processing natural language queries without pre-classification
+    - Complex workflows requiring multi-agent coordination
+
+    Flow:
+    1. Receive user query
+    2. Intent classification using IntentIdentificationAgent
+    3. Automatic routing to specialized agent:
+       - MemberVerificationAgent for member eligibility/status
+       - DeductibleOOPAgent for deductible/OOP information
+       - BenefitAccumulatorAgent for benefit usage tracking
+       - BenefitCoverageRAGAgent for coverage policy questions
+       - LocalRAGAgent for user-uploaded document queries
+    4. Agent execution with full error handling
+    5. Return unified response with intent, confidence, and results
+
+    Args:
+        request: OrchestrationRequest with query, optional context, and history flag
+
+    Returns:
+        JSON response with orchestration results
+
+    Example Request:
+        ```json
+        {
+            "query": "Is member M1001 active?",
+            "context": {},
+            "preserve_history": false
+        }
+        ```
+
+    Example Response:
+        ```json
+        {
+            "success": true,
+            "intent": "member_verification",
+            "confidence": 0.95,
+            "agent": "MemberVerificationAgent",
+            "result": {
+                "valid": true,
+                "member_id": "M1001",
+                "name": "John Doe",
+                "dob": "1990-01-01",
+                "status": "active"
+            },
+            "query": "Is member M1001 active?",
+            "reasoning": "Detected member ID: M1001. Pattern matches: 2 for member_verification",
+            "extracted_entities": {
+                "member_id": "M1001",
+                "query_type": "status"
+            }
+        }
+        ```
+
+    Error Response:
+        ```json
+        {
+            "success": false,
+            "error": "Member ID is required for verification",
+            "intent": "member_verification",
+            "confidence": 0.95,
+            "query": "Is the member active?"
+        }
+        ```
+    """
+    if not orchestration_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestration service not initialized"
+        )
+
+    try:
+        result = await orchestration_agent.process_query(
+            query=request.query,
+            context=request.context,
+            preserve_history=request.preserve_history
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Orchestration failed: {str(e)}")
+
+
+@app.post("/orchestrate/batch", tags=["Orchestration"])
+async def orchestrate_batch(request: BatchOrchestrationRequest):
+    """
+    Process multiple queries through orchestration in batch.
+
+    This endpoint allows you to process multiple user queries simultaneously,
+    with each query being independently routed to the appropriate agent based
+    on its intent classification.
+
+    Useful for:
+    - Processing conversation history
+    - Batch analysis of user queries
+    - Performance testing with multiple query types
+    - Analyzing intent distribution across queries
+
+    Args:
+        request: BatchOrchestrationRequest with list of queries and optional context
+
+    Returns:
+        JSON response with array of orchestration results
+
+    Example Request:
+        ```json
+        {
+            "queries": [
+                "Is member M1001 active?",
+                "What is the deductible for member M1234?",
+                "How many massage therapy visits has member M5678 used?",
+                "Is acupuncture covered under the plan?"
+            ],
+            "context": {}
+        }
+        ```
+
+    Example Response:
+        ```json
+        {
+            "results": [
+                {
+                    "success": true,
+                    "intent": "member_verification",
+                    "confidence": 0.95,
+                    "agent": "MemberVerificationAgent",
+                    "result": {...},
+                    "query": "Is member M1001 active?"
+                },
+                {
+                    "success": true,
+                    "intent": "deductible_oop",
+                    "confidence": 0.90,
+                    "agent": "DeductibleOOPAgent",
+                    "result": {...},
+                    "query": "What is the deductible for member M1234?"
+                },
+                {
+                    "success": true,
+                    "intent": "benefit_accumulator",
+                    "confidence": 0.98,
+                    "agent": "BenefitAccumulatorAgent",
+                    "result": {...},
+                    "query": "How many massage therapy visits has member M5678 used?"
+                },
+                {
+                    "success": true,
+                    "intent": "benefit_coverage_rag",
+                    "confidence": 0.85,
+                    "agent": "BenefitCoverageRAGAgent",
+                    "result": {...},
+                    "query": "Is acupuncture covered under the plan?"
+                }
+            ],
+            "total": 4,
+            "successful": 4,
+            "failed": 0,
+            "intents": {
+                "member_verification": 1,
+                "deductible_oop": 1,
+                "benefit_accumulator": 1,
+                "benefit_coverage_rag": 1
+            }
+        }
+        ```
+    """
+    if not orchestration_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestration service not initialized"
+        )
+
+    try:
+        results = await orchestration_agent.process_batch(
+            queries=request.queries,
+            context=request.context
+        )
+
+        # Calculate statistics
+        successful = sum(1 for r in results if r.get("success"))
+        failed = len(results) - successful
+
+        # Count intents
+        intent_counts = {}
+        for result in results:
+            intent = result.get("intent", "unknown")
+            intent_counts[intent] = intent_counts.get(intent, 0) + 1
+
+        return {
+            "results": results,
+            "total": len(results),
+            "successful": successful,
+            "failed": failed,
+            "intents": intent_counts
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch orchestration failed: {str(e)}")
+
+
+@app.get("/orchestrate/agents", tags=["Orchestration"])
+async def get_available_agents():
+    """
+    Get list of available specialized agents in the orchestration system.
+
+    Returns information about all agents that can be used for query processing,
+    including their capabilities and supported intents.
+
+    Returns:
+        JSON response with list of available agents
+
+    Example Response:
+        ```json
+        {
+            "agents": [
+                "IntentIdentificationAgent",
+                "MemberVerificationAgent",
+                "DeductibleOOPAgent",
+                "BenefitAccumulatorAgent",
+                "BenefitCoverageRAGAgent",
+                "LocalRAGAgent"
+            ],
+            "total_agents": 6,
+            "orchestration_enabled": true
+        }
+        ```
+    """
+    if not orchestration_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestration service not initialized"
+        )
+
+    try:
+        agents = orchestration_agent.get_available_agents()
+        return {
+            "agents": agents,
+            "total_agents": len(agents),
+            "orchestration_enabled": True
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve available agents: {str(e)}")
+
+
+@app.get("/orchestrate/history", tags=["Orchestration"])
+async def get_conversation_history():
+    """
+    Get conversation history for the current orchestration session.
+
+    Note: Conversation history is only maintained when preserve_history=true
+    is set in orchestration requests. Each orchestration agent instance
+    maintains its own history.
+
+    Returns:
+        JSON response with conversation history
+
+    Example Response:
+        ```json
+        {
+            "history": [
+                {
+                    "query": "Is member M1001 active?",
+                    "intent": "member_verification",
+                    "confidence": 0.95,
+                    "agent": "MemberVerificationAgent",
+                    "success": true,
+                    "timestamp": null
+                },
+                {
+                    "query": "What is their deductible?",
+                    "intent": "deductible_oop",
+                    "confidence": 0.88,
+                    "agent": "DeductibleOOPAgent",
+                    "success": true,
+                    "timestamp": null
+                }
+            ],
+            "total_interactions": 2
+        }
+        ```
+    """
+    if not orchestration_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestration service not initialized"
+        )
+
+    try:
+        history = orchestration_agent.get_conversation_history()
+        return {
+            "history": history,
+            "total_interactions": len(history)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve conversation history: {str(e)}")
+
+
+@app.delete("/orchestrate/history", tags=["Orchestration"])
+async def clear_conversation_history():
+    """
+    Clear conversation history for the current orchestration session.
+
+    Returns:
+        JSON response confirming history cleared
+
+    Example Response:
+        ```json
+        {
+            "success": true,
+            "message": "Conversation history cleared"
+        }
+        ```
+    """
+    if not orchestration_agent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestration service not initialized"
+        )
+
+    try:
+        orchestration_agent.clear_conversation_history()
+        return {
+            "success": True,
+            "message": "Conversation history cleared"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear conversation history: {str(e)}")
 
 
 # ============== Server Runner ==============
