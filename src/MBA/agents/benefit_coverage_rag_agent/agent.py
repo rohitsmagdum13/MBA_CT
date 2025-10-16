@@ -19,6 +19,7 @@ Architecture:
 
 import os
 from typing import Optional
+from typing import Dict, Any
 
 import boto3
 from botocore.exceptions import BotoCoreError, NoCredentialsError

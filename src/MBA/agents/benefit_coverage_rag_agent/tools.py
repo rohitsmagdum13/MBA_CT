@@ -14,9 +14,20 @@ import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from pathlib import Path
+import uuid
 
 import boto3
 from botocore.exceptions import ClientError, BotoCoreError
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue
+)
 
 from strands import tool
 
@@ -32,7 +43,8 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "1.5"))
 VECTOR_FIELD = os.getenv("VECTOR_FIELD", "vector_field")
 DEFAULT_INDEX = os.getenv("OPENSEARCH_INDEX", "benefit_coverage_rag_index")
-EMBEDDING_DIMENSION = 1536  # AWS Bedrock Titan Embeddings v2 dimension
+# AWS Bedrock Titan Embeddings v2 produces 1024 dimensions (not 1536)
+EMBEDDING_DIMENSION = 1024
 
 # Initialize AWS clients
 def get_aws_session():
@@ -133,8 +145,13 @@ Answer:"""
             ]
         }
 
+        # Use cross-region inference profile for Claude (required for on-demand throughput)
+        model_id = settings.bedrock_model_id
+        if "anthropic.claude" in model_id and not model_id.startswith("us."):
+            model_id = f"us.{model_id}"
+
         response = bedrock_runtime.invoke_model(
-            modelId=settings.bedrock_model_id,
+            modelId=model_id,
             body=json.dumps(payload)
         )
 
@@ -160,6 +177,7 @@ def rerank_documents(query: str, documents: List[str], top_n: int = 5) -> List[i
     """
     try:
         payload = {
+            "api_version": 2,  # Cohere Rerank v3.5 requires api_version >= 2
             "query": query,
             "documents": documents,
             "top_n": min(top_n, len(documents))
@@ -493,10 +511,46 @@ async def prepare_rag_pipeline(params: Dict[str, Any]) -> Dict[str, Any]:
         embeddings = get_bedrock_embeddings(texts)
         logger.info(f"Generated {len(embeddings)} embeddings")
 
-        # Step 4: Index in vector store (stub - you'll implement OpenSearch/Qdrant)
-        # For now, we'll just log success
-        # TODO: Implement actual OpenSearch/Qdrant indexing
-        logger.info(f"Would index {len(chunks)} chunks in {index_name}")
+        # Step 4: Index in Qdrant
+        try:
+            qdrant_client = QdrantClient(
+                url=settings.qdrant_url,
+                api_key=settings.qdrant_api_key,
+                timeout=60
+            )
+
+            # Create collection if not exists
+            collections = qdrant_client.get_collections().collections
+            existing = [c.name for c in collections]
+
+            if index_name not in existing:
+                qdrant_client.recreate_collection(
+                    collection_name=index_name,
+                    vectors_config=VectorParams(
+                        size=EMBEDDING_DIMENSION,
+                        distance=Distance.COSINE
+                    )
+                )
+                logger.info(f"Created new Qdrant collection: {index_name}")
+
+            # Build vector points
+            points = []
+            for chunk, vector in zip(chunks, embeddings):
+                content_hash = hashlib.sha256(chunk.page_content.encode()).hexdigest()
+                uid = str(uuid.UUID(content_hash[:32]))
+                points.append(PointStruct(
+                    id=uid,
+                    vector=vector,
+                    payload={"text": chunk.page_content, **chunk.metadata}
+                ))
+
+            # Bulk upload to Qdrant
+            qdrant_client.upsert(collection_name=index_name, points=points)
+            logger.info(f"Indexed {len(points)} chunks into Qdrant collection '{index_name}'")
+
+        except Exception as e:
+            logger.error(f"Qdrant indexing failed: {str(e)}")
+            return {"success": False, "error": f"Indexing failed: {str(e)}"}
 
         return {
             "success": True,
@@ -559,21 +613,38 @@ async def query_rag(params: Dict[str, Any]) -> Dict[str, Any]:
         # Step 1: Get query embedding
         query_embedding = get_bedrock_embeddings([question])[0]
 
-        # Step 2: Search vector store (stub - you'll implement actual search)
-        # TODO: Implement OpenSearch/Qdrant similarity search
-        # For now, return stub response
-
-        stub_docs = [
-            Document(
-                page_content="Massage therapy is covered with a limit of 6 visits per calendar year. Prior authorization is not required.",
-                metadata={"source": "policy.pdf", "page": 15, "section_title": "Therapy Services"}
+        # Step 2: Search Qdrant
+        try:
+            qdrant_client = QdrantClient(
+                url=settings.qdrant_url,
+                api_key=settings.qdrant_api_key,
+                timeout=60
             )
-        ]
 
-        # Step 3: Rerank (stub)
-        doc_texts = [doc.page_content for doc in stub_docs]
+            search_results = qdrant_client.search(
+                collection_name=index_name,
+                query_vector=query_embedding,
+                limit=k
+            )
+
+            retrieved_docs = []
+            for hit in search_results:
+                payload = hit.payload
+                retrieved_docs.append(Document(
+                    page_content=payload.get("text", ""),
+                    metadata={k: v for k, v in payload.items() if k != "text"}
+                ))
+
+            logger.info(f"Retrieved {len(retrieved_docs)} documents from Qdrant")
+
+        except Exception as e:
+            logger.error(f"Qdrant search failed: {str(e)}")
+            return {"success": False, "error": f"Vector search failed: {str(e)}"}
+
+        # Step 3: Rerank
+        doc_texts = [doc.page_content for doc in retrieved_docs]
         reranked_indices = rerank_documents(question, doc_texts, top_n=k)
-        reranked_docs = [stub_docs[i] for i in reranked_indices]
+        reranked_docs = [retrieved_docs[i] for i in reranked_indices]
 
         # Step 4: Generate answer
         context = "\n\n".join([doc.page_content for doc in reranked_docs])

@@ -44,6 +44,7 @@ pdfplumber>=0.10.0  # Fallback for complex PDF layouts with tables
 sentence-transformers>=2.2.2  # Local embedding models (all-MiniLM-L6-v2, 384-dim)
 torch>=2.0.0  # PyTorch backend for Sentence Transformers
 transformers>=4.30.0  # Hugging Face transformers library
+qdrant_client
 
 # Local Vector Database - ChromaDB for storing and querying document embeddings
 chromadb>=0.4.0  # Lightweight, embedded vector database with no server setup

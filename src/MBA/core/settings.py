@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     aws_profile: Optional[str] = None
 
     # ---------------- AWS Bedrock Configuration ----------------
-    bedrock_model_id: str = "arn:aws:bedrock:us-east-1:859065147353:inference-profile/us.anthropic.claude-3-sonnet-20240229-v1:0"
+    bedrock_model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 
     # ---------------- S3 Buckets ----------------
     s3_bucket_mba: str = "mb-assistant-bucket"
@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_dir: Path = Path("logs")
     log_file: str = "app.log"
+
+    # ---------------- Qdrant Configuration ----------------
+    qdrant_url: str = "https://6cff52b1-a13c-4049-9a3e-8993feb95210.us-east-1-1.aws.cloud.qdrant.io:6333"
+    qdrant_api_key: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.TdRHOh7YMp-CgFtvhcdQq01BBS3lLyacvhdDEHmKK-U"
+    qdrant_collection: str = "benefit_coverage_rag_index"
+    embedding_dimension: int = 1024
 
     # ---------------- Pydantic Settings ----------------
     model_config = SettingsConfigDict(
