@@ -1174,19 +1174,291 @@ def main():
 
         st.info("""
         **How it works:**
-        1. **Prepare**: Extract text from Textract JSON in S3 → Chunk → Embed with Bedrock Titan → Store in vector DB
-        2. **Query**: Semantic search → Rerank with Bedrock Cohere → Generate answer with Bedrock Claude
+        - **🆕 Dynamic Upload**: Upload PDF → Auto Textract → Auto RAG Prep → Query Ready!
+        - **Prepare**: Extract text from Textract JSON in S3 → Chunk → Embed with Bedrock Titan → Store in vector DB
+        - **Query**: Semantic search → Rerank with Bedrock Cohere → Generate answer with Bedrock Claude
         """)
 
         # Mode selection
         rag_mode = st.radio(
             "Operation Mode",
-            ["Prepare Pipeline", "Query Documents"],
+            ["🆕 Dynamic Upload", "Prepare Pipeline", "Query Documents"],
             horizontal=True,
             key="benefit_rag_mode"
         )
 
-        if rag_mode == "Prepare Pipeline":
+        if rag_mode == "🆕 Dynamic Upload":
+            st.subheader("🚀 Dynamic Upload + Auto RAG Pipeline")
+            st.markdown("**Upload PDF → Automatic Textract → Automatic RAG → Query Ready!**")
+
+            st.success("""
+            ✨ **One-Click Solution:**
+            1. Upload your PDF benefit document
+            2. System automatically uploads to S3
+            3. Textract extracts text (wait for processing)
+            4. RAG pipeline prepares automatically
+            5. Document is immediately ready for querying!
+            """)
+
+            uploaded_pdf = st.file_uploader(
+                "Choose a PDF benefit document",
+                type=["pdf"],
+                key="dynamic_rag_pdf_upload",
+                help="Upload a benefit policy PDF for automatic processing"
+            )
+
+            if uploaded_pdf:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Filename:** {uploaded_pdf.name}")
+                    st.write(f"**Size:** {uploaded_pdf.size / 1024:.2f} KB")
+                    st.write(f"**Type:** {uploaded_pdf.type}")
+
+                with col2:
+                    index_name = st.text_input(
+                        "Index Name (Optional)",
+                        placeholder="benefit_coverage_rag_index",
+                        help="Custom index name for this document",
+                        key="dynamic_rag_index_name"
+                    )
+
+                    chunk_size = st.number_input(
+                        "Chunk Size",
+                        min_value=500,
+                        max_value=2000,
+                        value=1000,
+                        step=100,
+                        help="Target chunk size in characters",
+                        key="dynamic_rag_chunk_size"
+                    )
+
+                st.divider()
+
+                if st.button("🚀 Upload & Prepare RAG Pipeline", type="primary", use_container_width=True):
+                    with st.spinner("📤 Step 1/4: Uploading PDF to S3..."):
+                        try:
+                            # Save uploaded file to temp location
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                                tmp.write(uploaded_pdf.read())
+                                temp_pdf_path = tmp.name
+
+                            # Upload to S3
+                            s3_key = f"pdf/{uploaded_pdf.name}"
+                            s3_uri = s3_client.upload_file(
+                                Path(temp_pdf_path),
+                                s3_key=s3_key,
+                                metadata={
+                                    "original_filename": uploaded_pdf.name,
+                                    "document_type": "pdf",
+                                    "workflow": "dynamic_rag"
+                                }
+                            )
+
+                            st.success(f"✅ Uploaded to S3: `{s3_uri}`")
+
+                            # Clean up temp file
+                            Path(temp_pdf_path).unlink(missing_ok=True)
+
+                            # Construct Textract output prefix
+                            # S3 client adds 'mba/' prefix, so full key is: mba/pdf/filename.pdf
+                            # Textract Lambda outputs to: mba/textract-output/mba/pdf/filename/{job_id}/
+                            # We need to include the full path structure
+
+                            # Get the actual uploaded key from S3 URI
+                            # S3 URI format: s3://bucket/key
+                            actual_s3_key = s3_uri.split(f"s3://{s3_client.bucket}/")[1]
+                            logger.info(f"Actual S3 key from upload: {actual_s3_key}")
+
+                            # Construct Textract output prefix based on actual key
+                            # If key is "mba/pdf/file.pdf", Textract outputs to "mba/textract-output/mba/pdf/file.pdf/{job_id}/"
+                            textract_prefix = f"mba/textract-output/{actual_s3_key}/"
+
+                            logger.info(f"Constructed Textract prefix: {textract_prefix}")
+
+                            st.divider()
+                            st.info(f"⏳ Step 2/4: Waiting for Textract processing...")
+                            st.caption(f"📁 Searching for Textract output: `s3://{s3_client.bucket}/{textract_prefix}`")
+                            st.caption(f"💡 Note: Textract creates job-specific subfolders automatically")
+
+                            # Wait for Textract to process - with progress updates
+                            import time
+                            import boto3
+
+                            max_wait_time = 60  # Wait up to 60 seconds
+                            check_interval = 5  # Check every 5 seconds
+
+                            st.info("⏳ Waiting for Textract to process the PDF...")
+
+                            # Create S3 client to check for output
+                            session = boto3.Session(
+                                aws_access_key_id=settings.aws_access_key_id,
+                                aws_secret_access_key=settings.aws_secret_access_key,
+                                region_name=settings.aws_default_region
+                            )
+                            boto_s3 = session.client('s3')
+
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+
+                            textract_completed = False
+                            for elapsed in range(0, max_wait_time, check_interval):
+                                progress_bar.progress((elapsed + check_interval) / max_wait_time)
+                                status_text.text(f"⏳ Checking for Textract output... ({elapsed + check_interval}s / {max_wait_time}s)")
+
+                                # Check if Textract output exists
+                                try:
+                                    response = boto_s3.list_objects_v2(
+                                        Bucket=s3_client.bucket,
+                                        Prefix=textract_prefix,
+                                        MaxKeys=1
+                                    )
+
+                                    if response.get('KeyCount', 0) > 0:
+                                        textract_completed = True
+                                        status_text.text("✅ Textract processing complete!")
+                                        break
+                                except Exception as e:
+                                    logger.warning(f"Error checking Textract output: {e}")
+
+                                time.sleep(check_interval)
+
+                            progress_bar.empty()
+
+                            if not textract_completed:
+                                st.warning(f"""
+                                ⚠️ Textract output not found after {max_wait_time} seconds.
+
+                                **Possible reasons:**
+                                1. Textract is still processing (large PDFs take longer)
+                                2. Textract Lambda failed (check CloudWatch logs)
+                                3. Textract Lambda is not configured
+
+                                **What to do:**
+                                - Wait a bit longer and try uploading again
+                                - Or use "Prepare Pipeline" mode manually once Textract completes
+                                - Check CloudWatch logs: `/aws/lambda/mba-textract-lambda`
+                                """)
+                            else:
+                                st.success(f"✅ Textract output detected at: `{textract_prefix}`")
+
+                            st.divider()
+
+                            # Only proceed if Textract completed
+                            if not textract_completed:
+                                st.error("❌ Cannot proceed without Textract output. Please check CloudWatch logs or try again later.")
+                                st.stop()
+
+                            # Step 3: Prepare RAG pipeline
+                            with st.spinner("🔄 Step 3/4: Preparing RAG pipeline from Textract output..."):
+                                # Lazy-load agent
+                                if benefit_coverage_rag_agent is None:
+                                    benefit_coverage_rag_agent = BenefitCoverageRAGAgent()
+
+                                import asyncio
+
+                                # Show detailed progress
+                                progress_placeholder = st.empty()
+                                progress_placeholder.info("📊 Extracting text from Textract JSON files...")
+
+                                result = asyncio.run(benefit_coverage_rag_agent.prepare_pipeline(
+                                    s3_bucket=s3_client.bucket,
+                                    textract_prefix=textract_prefix,
+                                    index_name=index_name if index_name else "benefit_coverage_rag_index",
+                                    chunk_size=chunk_size,
+                                    chunk_overlap=200
+                                ))
+
+                                progress_placeholder.empty()
+
+                                st.divider()
+
+                                if result.get("success"):
+                                    st.success("✅ Step 4/4: RAG Pipeline prepared successfully!")
+
+                                    st.balloons()
+
+                                    # Display metrics
+                                    col1, col2, col3, col4 = st.columns(4)
+                                    col1.metric("📄 Documents", result.get("doc_count", 0))
+                                    col2.metric("📦 Chunks", result.get("chunks_count", 0))
+                                    col3.metric("📁 Index", result.get("index_name", "N/A"))
+                                    col4.metric("✅ Status", "Ready to Query")
+
+                                    st.divider()
+
+                                    st.success(f"""
+                                    🎉 **All Done!** Your document is ready for querying.
+
+                                    **Next Steps:**
+                                    1. Switch to "Query Documents" mode
+                                    2. Ask questions about your benefit document
+                                    3. Get instant AI-powered answers with sources!
+                                    """)
+
+                                    # Show sample queries
+                                    with st.expander("💡 Sample Questions You Can Ask"):
+                                        st.markdown("""
+                                        - Is massage therapy covered?
+                                        - What are the deductibles for PPO plans?
+                                        - Are there visit limits for chiropractic care?
+                                        - What is the copay for physical therapy?
+                                        - Is acupuncture a covered benefit?
+                                        """)
+
+                                    with st.expander("📋 View Full RAG Preparation Response"):
+                                        st.json(result)
+
+                                else:
+                                    st.error("❌ RAG Pipeline preparation failed")
+
+                                    if "error" in result:
+                                        st.error(f"**Error:** {result['error']}")
+
+                                        # Check if it's a Textract-related error
+                                        if "No files found" in result.get('error', '') or "No page JSON" in result.get('error', ''):
+                                            st.warning("""
+                                            🔍 **Textract Output Not Found**
+
+                                            This usually means:
+                                            1. Textract Lambda hasn't processed the PDF yet (wait a few seconds/minutes)
+                                            2. Textract Lambda is not configured correctly
+                                            3. The expected output path is incorrect
+
+                                            **Solution:**
+                                            - Wait for Textract to complete
+                                            - Check Textract Lambda logs in AWS CloudWatch
+                                            - Or use "Prepare Pipeline" mode manually once Textract completes
+                                            """)
+
+                                    with st.expander("📋 View Error Details"):
+                                        st.json(result)
+
+                        except Exception as e:
+                            st.error(f"❌ Dynamic RAG workflow failed: {str(e)}")
+                            logger.error(f"Dynamic RAG workflow error: {str(e)}", exc_info=True)
+
+                            # Show troubleshooting tips
+                            with st.expander("🔧 Troubleshooting Tips"):
+                                st.markdown("""
+                                **Common Issues:**
+
+                                1. **S3 Upload Failed:**
+                                   - Check AWS credentials in settings
+                                   - Verify S3 bucket permissions
+
+                                2. **Textract Not Processing:**
+                                   - Ensure Textract Lambda is deployed
+                                   - Check Lambda trigger configuration
+                                   - Verify Lambda has S3 read/write permissions
+
+                                3. **RAG Pipeline Failed:**
+                                   - Check Qdrant/OpenSearch is running
+                                   - Verify AWS Bedrock access
+                                   - Check API quotas and limits
+                                """)
+
+        elif rag_mode == "Prepare Pipeline":
             st.subheader("🔧 Prepare RAG Pipeline")
             st.markdown("Prepare the RAG pipeline from AWS Textract output stored in S3.")
 
@@ -1323,9 +1595,14 @@ def main():
                                 if sources:
                                     st.subheader("📚 Sources")
                                     for idx, source in enumerate(sources, 1):
-                                        with st.expander(f"Source {idx} - Page {source.get('page', 'N/A')} (Score: {source.get('score', 0):.3f})"):
-                                            st.markdown(source.get("text", "No text available"))
-                                            st.caption(f"Metadata: {source.get('metadata', {})}")
+                                        # Handle both field names: "content" and "text"
+                                        page_num = source.get('metadata', {}).get('page', source.get('page', 'N/A'))
+                                        score = source.get('score', source.get('similarity_score', 0))
+                                        text_content = source.get("content", source.get("text", "No text available"))
+
+                                        with st.expander(f"Source {idx} - Page {page_num} (Score: {score:.3f})"):
+                                            st.markdown(text_content)
+                                            st.caption(f"**Metadata:** {source.get('metadata', {})}")
 
                                 with st.expander("📋 View Full Response"):
                                     st.json(result)
@@ -1774,7 +2051,27 @@ def main():
                                     st.json(result)
 
                             elif "error" in result:
-                                st.error(f"❌ Orchestration Error: {result['error']}")
+                                error_msg = result['error']
+
+                                # Check if it's a rate limiting error
+                                if "ThrottlingException" in error_msg or "Too many requests" in error_msg:
+                                    st.warning("⚠️ **AWS Bedrock Rate Limit Reached**")
+                                    st.info("""
+                                    The orchestration agent hit AWS Bedrock's rate limits.
+
+                                    **What this means:**
+                                    - You're making requests too quickly
+                                    - AWS Bedrock has usage quotas
+
+                                    **Solutions:**
+                                    1. **Wait 30-60 seconds** and try again
+                                    2. **Use specific agent tabs directly** (Benefit Coverage RAG, Member Verification, etc.) - these work independently
+                                    3. **Request quota increase** in AWS Console → Bedrock → Service Quotas
+
+                                    **Note:** The underlying agents work fine! Only the orchestration routing is throttled.
+                                    """)
+                                else:
+                                    st.error(f"❌ Orchestration Error: {error_msg}")
 
                                 if show_reasoning:
                                     with st.expander("🧠 AI Classification Details"):

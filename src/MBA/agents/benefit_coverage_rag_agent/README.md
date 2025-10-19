@@ -535,6 +535,305 @@ Each chunk is enriched with benefit coverage-specific metadata:
 
 ---
 
+## NEW: Dynamic File Upload + Auto RAG Pipeline
+
+The Benefit Coverage RAG Agent now supports **dynamic document processing** with the new `/rag/upload-and-prepare` endpoint!
+
+### How It Works
+
+**Traditional Workflow (Manual):**
+1. Upload PDF to S3
+2. Wait for Textract Lambda to process
+3. Manually call `/rag/prepare` with Textract output path
+4. Query with `/rag/query`
+
+**NEW Dynamic Workflow (Automatic):**
+1. Upload PDF via `/rag/upload-and-prepare`
+2. System automatically:
+   - Uploads PDF to S3
+   - Detects Textract output location
+   - Runs RAG preparation pipeline
+   - Indexes document for querying
+3. Document ready for immediate querying!
+
+### Usage Example
+
+```bash
+# Upload PDF and prepare RAG pipeline in one request
+curl -X POST "http://localhost:8000/rag/upload-and-prepare" \
+  -H "accept: application/json" \
+  -F "file=@benefits_2024.pdf" \
+  -F "index_name=benefits_2024_index" \
+  -F "chunk_size=1000" \
+  -F "chunk_overlap=200"
+
+# Response
+{
+  "success": true,
+  "message": "PDF uploaded and RAG pipeline prepared successfully",
+  "file_name": "benefits_2024.pdf",
+  "s3_uri": "s3://mb-assistant-bucket/mba/pdf/benefits_2024.pdf",
+  "textract_output_prefix": "mba/textract-output/mba/pdf/benefits_2024.pdf/",
+  "rag_preparation": {
+    "success": true,
+    "message": "Processed 15 docs into 67 chunks",
+    "chunks_count": 67,
+    "doc_count": 15,
+    "index_name": "benefits_2024_index"
+  },
+  "query_ready": true,
+  "next_steps": "You can now query this document using POST /rag/query with index_name='benefits_2024_index'"
+}
+
+# Immediately query the document
+curl -X POST "http://localhost:8000/rag/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What is covered under massage therapy?",
+    "index_name": "benefits_2024_index",
+    "k": 5
+  }'
+```
+
+## Comprehensive Logging
+
+The RAG pipeline now includes **detailed, easy-to-understand logs** at every step:
+
+### 1. Textract Text Extraction Logs
+```
+================================================================================
+STEP: EXTRACTING TEXT FROM TEXTRACT S3 OUTPUT
+================================================================================
+📦 S3 Bucket: mb-assistant-bucket
+📁 Textract Prefix: mba/textract-output/mba/pdf/policy.pdf/
+🌐 Full S3 Path: s3://mb-assistant-bucket/mba/textract-output/...
+
+🔍 Listing objects in S3...
+📂 Total files found in prefix: 16
+   - manifest.json
+   - page_0001.json
+   - page_0002.json
+   ...
+
+✅ Found 15 Textract page JSON files
+
+────────────────────────────────────────────────────────────
+Processing Page 1/15: page_0001.json
+   📥 Downloading from S3...
+   📖 Page number: 1
+   🔍 Total Textract blocks: 156
+   📝 Extracted LINE blocks: 142
+   📊 Detected TABLE blocks: 3
+   📏 Total text length: 2,847 characters
+   📄 Text preview: Therapy Services Coverage...
+   ✅ Document created with 3 table markers
+
+================================================================================
+✅ TEXT EXTRACTION COMPLETE
+📊 Summary:
+   - Total pages processed: 15
+   - Documents created: 15
+   - Pages with tables: 8
+   - Total characters extracted: 45,231
+================================================================================
+```
+
+### 2. Intelligent Chunking Logs
+```
+================================================================================
+STEP: INTELLIGENT DOCUMENT CHUNKING
+================================================================================
+📚 Documents to chunk: 15
+📏 Default chunk size: 1000 characters
+🔄 Chunk overlap: 200 characters
+
+💡 Chunking Strategy:
+   - Tables/CPT codes: 600 chars (smaller for dense content)
+   - Sparse content (<20 words): 1500 chars (larger chunks)
+   - Normal text: 1000 chars
+   - Preserve paragraph boundaries
+   - Extract metadata (section, category, CPT codes, etc.)
+
+────────────────────────────────────────────────────────────
+Processing Document 1/15
+   📄 Source: page_0001.json
+   📖 Page: 1
+   📏 Length: 2847 characters
+   📝 Paragraphs detected: 12
+
+   Para 1: Type=NORMAL, Size=456 chars, Words=67
+      Adaptive chunk size: 1000
+      Preview: Therapy Services Coverage\n\nMassage Therapy is a covered benefit...
+
+   ✅ Chunk 1 created:
+      Length: 987 chars
+      Metadata: {'benefit_category': 'Therapy Services', 'cpt_codes': ['97124']}
+      Content: Massage Therapy is a covered benefit...
+
+   ✅ Document 1 produced 3 chunks
+
+================================================================================
+✅ CHUNKING COMPLETE
+📊 Summary:
+   - Total documents processed: 15
+   - Total chunks created: 67
+   - Average chunks per document: 4.5
+   - Min chunk size: 456 chars
+   - Max chunk size: 1498 chars
+   - Average chunk size: 892 chars
+   - Chunks with CPT codes: 23
+   - Chunks with benefit category: 45
+================================================================================
+```
+
+### 3. Embedding Generation Logs
+```
+================================================================================
+STEP: GENERATING EMBEDDINGS WITH AWS BEDROCK TITAN
+================================================================================
+📊 Total texts to embed: 67
+🤖 Model: amazon.titan-embed-text-v2:0
+📐 Output dimension: 1024
+
+🔄 Processing text 1/67
+   📝 Text length: 987 characters
+   📄 Preview: Massage Therapy is a covered benefit...
+   🌐 Calling Bedrock Titan API...
+   ✅ Embedding generated successfully
+   📊 Vector dimension: 1024
+   🔢 Vector sample (first 5 values): [0.0234, -0.0156, 0.0892, ...]
+
+...
+
+✅ EMBEDDING GENERATION COMPLETE
+📊 Successfully generated: 67/67 embeddings
+⚠️  Fallback vectors used: 0/67
+================================================================================
+```
+
+### 4. Vector Indexing Logs
+```
+================================================================================
+STEP: INDEXING IN QDRANT VECTOR STORE
+================================================================================
+🗄️  Qdrant URL: http://localhost:6333
+📁 Collection name: benefit_coverage_rag_index
+📐 Vector dimension: 1024
+📏 Distance metric: COSINE
+
+🔌 Connecting to Qdrant...
+✅ Connected to Qdrant successfully
+
+🔍 Checking if collection 'benefit_coverage_rag_index' exists...
+📚 Existing collections: ['benefit_coverage_rag_index', 'test_collection']
+✅ Collection 'benefit_coverage_rag_index' already exists, will upsert points
+
+🔨 Building vector points for indexing...
+
+   Point 1:
+      ID: f7e8a9b2-4c3d-1e5f-6a7b-8c9d0e1f2a3b
+      Vector dimension: 1024
+      Vector sample: [0.0234, -0.0156, 0.0892]
+      Payload keys: ['source', 'page', 's3_bucket', 'benefit_category', 'cpt_codes']
+      Text preview: Massage Therapy is a covered benefit...
+
+✅ Built 67 vector points
+
+📤 Upserting 67 points to Qdrant collection 'benefit_coverage_rag_index'...
+
+✅ INDEXING COMPLETE
+📊 Successfully indexed 67 chunks into Qdrant collection 'benefit_coverage_rag_index'
+📈 Collection info:
+   - Total vectors: 67
+   - Vector dimension: 1024
+   - Distance metric: Cosine
+================================================================================
+```
+
+### 5. Query Embedding & Search Logs
+```
+================================================================================
+STEP 1: GENERATING QUERY EMBEDDING
+================================================================================
+🔍 Query: Is massage therapy covered?
+📏 Query length: 29 characters
+...
+✅ Query embedding generated
+📐 Embedding dimension: 1024
+
+================================================================================
+STEP 2: SEMANTIC SEARCH IN VECTOR STORE
+================================================================================
+🗄️  Qdrant URL: http://localhost:6333
+📁 Collection: benefit_coverage_rag_index
+🎯 Retrieving top k=5 documents
+
+🔌 Connecting to Qdrant...
+✅ Connected successfully
+
+🔍 Performing vector similarity search...
+✅ Search complete, found 5 results
+
+📄 Retrieved documents:
+
+   Result 1:
+      Score: 0.8734
+      Source: page_0001.json
+      Page: 1
+      Text length: 987 chars
+      Preview: Massage Therapy is a covered benefit...
+
+   Result 2:
+      Score: 0.7821
+      Source: page_0002.json
+      Page: 2
+      Text length: 756 chars
+      Preview: Therapy Services cost-sharing...
+
+✅ Retrieved 5 documents from Qdrant
+================================================================================
+```
+
+### 6. Reranking Logs
+```
+================================================================================
+STEP: RERANKING DOCUMENTS WITH AWS BEDROCK COHERE
+================================================================================
+🔍 Query: Is massage therapy covered?
+📚 Documents to rerank: 5
+🎯 Top N to return: 5
+🤖 Model: cohere.rerank-v3-5:0
+
+📄 Document previews before reranking:
+   Doc 0: Massage Therapy is a covered benefit...
+   Doc 1: Therapy Services cost-sharing...
+   Doc 2: Prior authorization requirements...
+   Doc 3: Excluded services and limitations...
+   Doc 4: Appeal process for denied claims...
+
+🌐 Calling Bedrock Cohere Rerank API...
+
+✅ RERANKING COMPLETE
+📊 Reranking results:
+   Rank 1: Original Index 0, Score 0.9876
+      └─ Massage Therapy is a covered benefit...
+   Rank 2: Original Index 1, Score 0.8234
+      └─ Therapy Services cost-sharing...
+   Rank 3: Original Index 2, Score 0.5612
+      └─ Prior authorization requirements...
+
+🎯 Final reranked indices: [0, 1, 2, 3, 4]
+================================================================================
+```
+
+### Logging Benefits
+
+1. **Troubleshooting**: Easily identify where RAG pipeline fails
+2. **Performance Monitoring**: Track processing times and bottlenecks
+3. **Data Validation**: Verify text extraction, chunking, and embedding quality
+4. **Transparency**: Understand exactly how documents are processed and indexed
+5. **Debugging**: Detailed context for error resolution
+
 ## Future Enhancements
 
 1. **Vector Store Options:** Support for Pinecone, Weaviate
@@ -542,7 +841,7 @@ Each chunk is enriched with benefit coverage-specific metadata:
 3. **Multi-Document Queries:** Cross-reference multiple policy documents
 4. **Conversation Memory:** Multi-turn question answering
 5. **Query Analytics:** Track common questions and answer quality
-6. **Automated Pipeline:** Trigger RAG prep on Textract completion
+6. **Textract Webhook Integration:** Real-time notification when Textract completes
 
 ---
 

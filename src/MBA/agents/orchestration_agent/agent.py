@@ -80,15 +80,19 @@ except Exception as e:
 
 # Initialize Strands Agent
 try:
+    # Use Claude 3.5 Sonnet v1 (supported with on-demand throughput)
+    # The v2 model requires inference profiles which are not yet configured
+    model_id = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+
     orchestration_agent = Agent(
         name="OrchestrationAgent",
         system_prompt=ORCHESTRATION_PROMPT,
         tools=[analyze_query, route_to_agent, format_response],
-        model=settings.bedrock_model_id
+        model=model_id
     )
 
     logger.info("Orchestration Agent initialized successfully")
-    logger.info(f"Model: {settings.bedrock_model_id}")
+    logger.info(f"Model: {model_id}")
     logger.info("Tools: analyze_query, route_to_agent, format_response")
     logger.info("Orchestration Agent ready for intelligent multi-agent routing")
 

@@ -354,10 +354,10 @@ class MBALambdaRouter:
     def route_event(self, event_record: Dict[str, Any]) -> Dict[str, Any]:
         """
         Route single S3 event record to appropriate pipeline.
-        
+
         Args:
             event_record: S3 event record
-            
+
         Returns:
             Processing result
         """
@@ -366,6 +366,11 @@ class MBALambdaRouter:
             s3_info = event_record['s3']
             bucket = s3_info['bucket']['name']
             key = s3_info['object']['key']
+
+            # URL decode the S3 key (S3 events send URL-encoded keys)
+            from urllib.parse import unquote_plus
+            key = unquote_plus(key)
+
             event_time = event_record.get('eventTime', datetime.now().isoformat())
             
             logger.info(

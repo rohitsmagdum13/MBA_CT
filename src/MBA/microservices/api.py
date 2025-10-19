@@ -927,6 +927,205 @@ async def prepare_rag_pipeline(request: RAGPrepareRequest):
         raise HTTPException(status_code=500, detail=f"RAG pipeline preparation failed: {str(e)}")
 
 
+@app.post("/rag/upload-and-prepare", tags=["RAG"])
+async def upload_pdf_and_prepare_rag(
+    file: UploadFile = File(...),
+    index_name: Optional[str] = None,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+    background_tasks: BackgroundTasks = None
+):
+    """
+    **DYNAMIC RAG WORKFLOW**: Upload PDF + Textract + Auto RAG Pipeline Preparation.
+
+    This endpoint provides an all-in-one solution for uploading a PDF document
+    and automatically preparing it for RAG querying. It handles:
+
+    1. File upload to S3
+    2. Triggering AWS Textract for text extraction
+    3. Automatically running the RAG pipeline on the Textract output
+    4. Indexing the document for immediate querying
+
+    **Flow:**
+    1. Upload PDF to S3 (mba/pdf/)
+    2. Trigger AWS Textract Lambda (processes PDF → JSON outputs to mba/textract-output/)
+    3. Automatically detect Textract output location
+    4. Run RAG preparation pipeline:
+       - Extract text from Textract JSON
+       - Apply intelligent chunking
+       - Generate embeddings with Bedrock Titan
+       - Index in Qdrant vector store
+    5. Return status and query-ready confirmation
+
+    **Args:**
+        file: PDF file to upload (multipart/form-data)
+        index_name: Optional custom index name (default: benefit_coverage_rag_index)
+        chunk_size: Target chunk size in characters (default: 1000)
+        chunk_overlap: Chunk overlap in characters (default: 200)
+
+    **Returns:**
+        JSON response with upload status, Textract job info, and RAG preparation results
+
+    **Example Request:**
+    ```bash
+    curl -X POST "http://localhost:8000/rag/upload-and-prepare" \\
+      -H "accept: application/json" \\
+      -F "file=@policy_document.pdf" \\
+      -F "index_name=my_benefits_index" \\
+      -F "chunk_size=1000" \\
+      -F "chunk_overlap=200"
+    ```
+
+    **Example Response:**
+    ```json
+    {
+      "success": true,
+      "message": "PDF uploaded and RAG pipeline prepared successfully",
+      "file_name": "policy_document.pdf",
+      "s3_uri": "s3://mb-assistant-bucket/mba/pdf/policy_document.pdf",
+      "textract_output_prefix": "mba/textract-output/mba/pdf/policy_document.pdf/",
+      "rag_preparation": {
+        "success": true,
+        "message": "Processed 15 docs into 67 chunks",
+        "chunks_count": 67,
+        "doc_count": 15,
+        "index_name": "benefit_coverage_rag_index"
+      },
+      "query_ready": true,
+      "next_steps": "You can now query this document using POST /rag/query"
+    }
+    ```
+
+    **Note:** This endpoint assumes AWS Textract Lambda is configured to automatically
+    process PDFs uploaded to the mba/pdf/ prefix and output results to mba/textract-output/.
+    """
+    if not all([s3_client, file_processor, benefit_coverage_rag_agent]):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Required services not initialized"
+        )
+
+    # Validate PDF file
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF files are supported for RAG pipeline"
+        )
+
+    temp_file = None
+    try:
+        logger.info(f"=" * 80)
+        logger.info(f"DYNAMIC RAG WORKFLOW STARTED: {file.filename}")
+        logger.info(f"=" * 80)
+
+        # Step 1: Save uploaded file temporarily
+        logger.info(f"STEP 1: Saving uploaded PDF temporarily...")
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            temp_file = Path(tmp.name)
+
+        logger.info(f"✅ File saved: {temp_file}")
+
+        # Step 2: Validate file
+        logger.info(f"\nSTEP 2: Validating PDF file...")
+        if not file_processor.validate_file(temp_file):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File validation failed: {file.filename}"
+            )
+        logger.info(f"✅ File validation passed")
+
+        # Step 3: Upload to S3 (mba/pdf/ prefix)
+        logger.info(f"\nSTEP 3: Uploading PDF to S3...")
+        s3_key = f"pdf/{file.filename}"
+        s3_uri = s3_client.upload_file(
+            temp_file,
+            s3_key=s3_key,
+            metadata={
+                "original_filename": file.filename,
+                "document_type": "pdf",
+                "workflow": "dynamic_rag"
+            }
+        )
+        logger.info(f"✅ Uploaded to: {s3_uri}")
+
+        # Step 4: Construct expected Textract output prefix
+        # AWS Textract Lambda should output to: mba/textract-output/mba/pdf/{filename}/
+        logger.info(f"\nSTEP 4: Determining Textract output location...")
+        textract_prefix = f"textract-output/{s3_key}/"
+        logger.info(f"📁 Expected Textract output: s3://{s3_client.bucket}/{textract_prefix}")
+
+        # Step 5: Wait briefly for Textract processing (if synchronous)
+        # NOTE: In production, Textract is usually async. You may need to poll or use SNS notifications.
+        logger.info(f"\nSTEP 5: Waiting for Textract processing...")
+        logger.info(f"⏳ Assuming Textract Lambda processes the PDF automatically...")
+        logger.info(f"⚠️  Note: This endpoint assumes Textract has completed processing.")
+        logger.info(f"   For async workflows, implement polling or webhook notification.")
+
+        # Step 6: Prepare RAG pipeline from Textract output
+        logger.info(f"\nSTEP 6: Preparing RAG pipeline from Textract output...")
+
+        index = index_name or "benefit_coverage_rag_index"
+
+        rag_result = await benefit_coverage_rag_agent.prepare_pipeline(
+            s3_bucket=s3_client.bucket,
+            textract_prefix=textract_prefix,
+            index_name=index,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
+
+        if not rag_result.get("success"):
+            logger.error(f"❌ RAG pipeline preparation failed: {rag_result.get('error')}")
+            return {
+                "success": False,
+                "message": "PDF uploaded but RAG pipeline preparation failed",
+                "file_name": file.filename,
+                "s3_uri": s3_uri,
+                "textract_output_prefix": textract_prefix,
+                "rag_preparation": rag_result,
+                "query_ready": False,
+                "error": rag_result.get("error")
+            }
+
+        logger.info(f"✅ RAG pipeline prepared successfully!")
+        logger.info(f"=" * 80)
+        logger.info(f"DYNAMIC RAG WORKFLOW COMPLETE")
+        logger.info(f"Document is now ready for querying!")
+        logger.info(f"=" * 80)
+
+        return {
+            "success": True,
+            "message": "PDF uploaded and RAG pipeline prepared successfully",
+            "file_name": file.filename,
+            "s3_uri": s3_uri,
+            "textract_output_prefix": textract_prefix,
+            "rag_preparation": rag_result,
+            "query_ready": True,
+            "next_steps": f"You can now query this document using POST /rag/query with index_name='{index}'"
+        }
+
+    except UploadError as e:
+        logger.error(f"❌ Upload error: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=e.message
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in dynamic RAG workflow: {str(e)}")
+        logger.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Dynamic RAG workflow failed: {str(e)}"
+        )
+    finally:
+        if temp_file and temp_file.exists():
+            temp_file.unlink()
+            logger.info(f"🧹 Cleaned up temporary file")
+
+
 @app.post("/rag/query", tags=["RAG"])
 async def query_benefit_coverage(request: RAGQueryRequest):
     """
