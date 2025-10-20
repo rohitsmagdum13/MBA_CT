@@ -8,7 +8,7 @@ in the MBA system.
 from typing import Dict, Any, Optional
 
 from ...core.logging_config import get_logger
-from ...core.exceptions import ConfigError
+from ...core.exceptions import ConfigError, AgentError, ValidationError
 
 logger = get_logger(__name__)
 
@@ -49,7 +49,7 @@ class IntentIdentificationAgent:
 
         Raises:
             ConfigError: If agent cannot be initialized
-            RuntimeError: If agent module import fails
+            AgentError: If agent module import fails
 
         Side Effects:
             - Imports agent module
@@ -68,8 +68,9 @@ class IntentIdentificationAgent:
 
         except ImportError as e:
             logger.error(f"Failed to import intent identification agent: {e}")
-            raise RuntimeError(
-                f"Agent initialization failed: Cannot import agent module - {str(e)}"
+            raise AgentError(
+                f"Agent initialization failed: Cannot import agent module - {str(e)}",
+                details={"agent_type": "intent_identification", "error_type": "ImportError"}
             )
 
         except ConfigError as e:
@@ -78,7 +79,10 @@ class IntentIdentificationAgent:
 
         except Exception as e:
             logger.error(f"Unexpected error initializing agent: {str(e)}")
-            raise RuntimeError(f"Agent initialization failed: {str(e)}")
+            raise AgentError(
+                f"Agent initialization failed: {str(e)}",
+                details={"agent_type": "intent_identification", "error_type": type(e).__name__}
+            )
 
     async def identify(
         self,
@@ -108,8 +112,8 @@ class IntentIdentificationAgent:
                 - query: str (original query)
 
         Raises:
-            ValueError: If query is empty or invalid
-            RuntimeError: If agent execution fails
+            ValidationError: If query is empty or invalid
+            AgentError: If agent execution fails
 
         Example:
             >>> agent = IntentIdentificationAgent()
@@ -137,7 +141,10 @@ class IntentIdentificationAgent:
         # Validate query
         if not query or not query.strip():
             logger.error("Intent identification attempted without query")
-            raise ValueError("query is required and cannot be empty")
+            raise ValidationError(
+                "query is required and cannot be empty",
+                details={"operation": "intent_identification"}
+            )
 
         # Build parameters
         params = {"query": query.strip()}
@@ -152,7 +159,7 @@ class IntentIdentificationAgent:
         # Ensure agent initialized
         try:
             self._ensure_initialized()
-        except (ConfigError, RuntimeError) as e:
+        except (ConfigError, AgentError) as e:
             logger.error(f"Agent initialization failed: {str(e)}")
             return {
                 "success": False,

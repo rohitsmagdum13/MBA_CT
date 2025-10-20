@@ -23,6 +23,8 @@ from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .exceptions import ValidationError
+
 
 class Settings(BaseSettings):
     """
@@ -147,12 +149,15 @@ class Settings(BaseSettings):
             str: S3 bucket name for the scope
             
         Raises:
-            ValueError: If scope is not "mba"
+            ValidationError: If scope is not "mba"
         """
         s = scope.strip().lower()
         if s == "mba":
             return self.s3_bucket_mba
-        raise ValueError(f"Invalid scope: {scope}")
+        raise ValidationError(
+            f"Invalid scope: {scope}",
+            details={"valid_scopes": ["mba"], "provided_scope": scope}
+        )
 
     def get_prefix(self, scope: str) -> str:
         """
@@ -167,14 +172,17 @@ class Settings(BaseSettings):
             str: S3 prefix ending with '/'
             
         Raises:
-            ValueError: If scope is not valid
+            ValidationError: If scope is not valid
         """
         s = scope.strip().lower()
         if s == "mba":
             return self.s3_prefix_mba
         elif s == "csv":
             return self.s3_prefix_csv
-        raise ValueError(f"Invalid scope: {scope}")
+        raise ValidationError(
+            f"Invalid scope: {scope}",
+            details={"valid_scopes": ["mba", "csv"], "provided_scope": scope}
+        )
     
     def get_database_url(self, driver: str = "pymysql") -> str:
         """

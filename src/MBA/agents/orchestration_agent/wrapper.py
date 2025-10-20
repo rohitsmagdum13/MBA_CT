@@ -20,7 +20,7 @@ Usage:
 from typing import Dict, Any, Optional, List
 
 from ...core.logging_config import get_logger
-from ...core.exceptions import ConfigError
+from ...core.exceptions import ConfigError, AgentError, ValidationError
 
 logger = get_logger(__name__)
 
@@ -76,7 +76,7 @@ class OrchestrationAgent:
 
         Raises:
             ConfigError: If agent cannot be initialized
-            RuntimeError: If agent module import fails
+            AgentError: If agent module import fails
 
         Side Effects:
             - Imports agent module
@@ -96,8 +96,9 @@ class OrchestrationAgent:
 
         except ImportError as e:
             logger.error(f"Failed to import orchestration agent: {e}")
-            raise RuntimeError(
-                f"Agent initialization failed: Cannot import agent module - {str(e)}"
+            raise AgentError(
+                f"Agent initialization failed: Cannot import agent module - {str(e)}",
+                details={"agent_type": "orchestration", "error_type": "ImportError"}
             )
 
         except ConfigError as e:
@@ -106,7 +107,10 @@ class OrchestrationAgent:
 
         except Exception as e:
             logger.error(f"Unexpected error initializing agent: {str(e)}")
-            raise RuntimeError(f"Agent initialization failed: {str(e)}")
+            raise AgentError(
+                f"Agent initialization failed: {str(e)}",
+                details={"agent_type": "orchestration", "error_type": type(e).__name__}
+            )
 
     def _build_orchestration_prompt(self, query: str, context: Optional[Dict[str, Any]] = None) -> str:
         """
@@ -350,8 +354,8 @@ class OrchestrationAgent:
             - error: str (error message if applicable)
 
         Raises:
-            ValueError: If query is empty or invalid
-            RuntimeError: If orchestration fails
+            ValidationError: If query is empty or invalid
+            AgentError: If orchestration fails
 
         Example:
             >>> agent = OrchestrationAgent()
@@ -377,7 +381,10 @@ class OrchestrationAgent:
         # Validate query
         if not query or not query.strip():
             logger.error("Orchestration attempted without query")
-            raise ValueError("query is required and cannot be empty")
+            raise ValidationError(
+                "query is required and cannot be empty",
+                details={"operation": "orchestration"}
+            )
 
         query = query.strip()
 
@@ -389,7 +396,7 @@ class OrchestrationAgent:
         # Ensure agent initialized
         try:
             self._ensure_initialized()
-        except (ConfigError, RuntimeError) as e:
+        except (ConfigError, AgentError) as e:
             logger.error(f"Agent initialization failed: {str(e)}")
             return {
                 "success": False,

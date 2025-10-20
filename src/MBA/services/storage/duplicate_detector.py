@@ -22,7 +22,7 @@ from typing import Dict, Set, Optional, List, Tuple
 from collections import defaultdict
 from threading import Lock
 
-from MBA.core.exceptions import FileDiscoveryError
+from MBA.core.exceptions import FileDiscoveryError, ValidationError
 from MBA.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -63,7 +63,7 @@ class DuplicateDetector:
             chunk_size (int): Bytes to read per chunk (default: 8192)
                 
         Raises:
-            ValueError: If algorithm is not supported
+            ValidationError: If algorithm is not supported
             
         Side Effects:
             - Validates hash algorithm availability
@@ -72,9 +72,13 @@ class DuplicateDetector:
         """
         # Validate algorithm
         if algorithm not in hashlib.algorithms_available:
-            raise ValueError(
+            raise ValidationError(
                 f"Hash algorithm '{algorithm}' not available. "
-                f"Supported: {sorted(hashlib.algorithms_available)}"
+                f"Supported: {sorted(hashlib.algorithms_available)}",
+                details={
+                    "requested_algorithm": algorithm,
+                    "available_algorithms": sorted(hashlib.algorithms_available)
+                }
             )
         
         self.algorithm = algorithm

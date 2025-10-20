@@ -167,3 +167,37 @@ class TextractError(MBAIngestionError):
         - Persisting outputs to S3 fails
     """
     pass
+
+
+class AgentError(MBAIngestionError):
+    """
+    Raised when agent initialization or execution fails.
+
+    Used for errors during agent setup, model loading, tool registration,
+    or agent execution failures.
+
+    Common scenarios:
+        - Model loading failures (Bedrock)
+        - Agent tool registration failures
+        - Invalid tool inputs/outputs
+        - Agent state corruption
+        - Agent initialization errors
+    """
+    pass
+
+
+class ValidationError(MBAIngestionError):
+    """
+    Raised when input validation fails.
+
+    Used for errors during parameter validation, input checking,
+    or constraint verification before processing.
+
+    Common scenarios:
+        - Required parameter missing
+        - Invalid parameter type or format
+        - Parameter out of valid range
+        - Hash algorithm not supported
+        - Invalid scope or configuration values
+    """
+    pass

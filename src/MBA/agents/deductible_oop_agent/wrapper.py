@@ -20,7 +20,7 @@ Usage:
 from typing import Dict, Any, Optional
 
 from ...core.logging_config import get_logger
-from ...core.exceptions import ConfigError, DatabaseError
+from ...core.exceptions import ConfigError, DatabaseError, AgentError, ValidationError
 
 logger = get_logger(__name__)
 
@@ -77,7 +77,7 @@ class DeductibleOOPAgent:
 
         Raises:
             ConfigError: If agent cannot be initialized
-            RuntimeError: If agent module import fails
+            AgentError: If agent module import fails
 
         Side Effects:
             - Imports agent module
@@ -97,8 +97,9 @@ class DeductibleOOPAgent:
 
         except ImportError as e:
             logger.error(f"Failed to import deductible/OOP agent: {e}")
-            raise RuntimeError(
-                f"Agent initialization failed: Cannot import agent module - {str(e)}"
+            raise AgentError(
+                f"Agent initialization failed: Cannot import agent module - {str(e)}",
+                details={"agent_type": "deductible_oop", "error_type": "ImportError"}
             )
 
         except ConfigError as e:
@@ -107,7 +108,10 @@ class DeductibleOOPAgent:
 
         except Exception as e:
             logger.error(f"Unexpected error initializing agent: {str(e)}")
-            raise RuntimeError(f"Agent initialization failed: {str(e)}")
+            raise AgentError(
+                f"Agent initialization failed: {str(e)}",
+                details={"agent_type": "deductible_oop", "error_type": type(e).__name__}
+            )
 
     def _build_lookup_prompt(self, params: Dict[str, Any]) -> str:
         """
@@ -205,8 +209,8 @@ class DeductibleOOPAgent:
             - Error: {"error": str}
 
         Raises:
-            ValueError: If member_id not provided
-            RuntimeError: If agent execution fails
+            ValidationError: If member_id not provided
+            AgentError: If agent execution fails
 
         Example:
             >>> agent = DeductibleOOPAgent()
@@ -222,7 +226,10 @@ class DeductibleOOPAgent:
         # Validate member_id
         if not member_id:
             logger.error("Deductible/OOP lookup attempted without member_id")
-            raise ValueError("member_id is required")
+            raise ValidationError(
+                "member_id is required",
+                details={"operation": "deductible_oop_lookup"}
+            )
 
         # Build parameters dictionary
         params = {"member_id": member_id}
@@ -243,7 +250,7 @@ class DeductibleOOPAgent:
         # Ensure agent initialized
         try:
             self._ensure_initialized()
-        except (ConfigError, RuntimeError) as e:
+        except (ConfigError, AgentError) as e:
             logger.error(f"Agent initialization failed: {str(e)}")
             return {"error": f"Lookup service unavailable: {str(e)}"}
 

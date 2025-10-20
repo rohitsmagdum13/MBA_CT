@@ -23,7 +23,7 @@ Usage:
 from typing import Dict, Any, Optional
 
 from ...core.logging_config import get_logger
-from ...core.exceptions import ConfigError, UploadError, TextractError
+from ...core.exceptions import ConfigError, UploadError, TextractError, AgentError, ValidationError
 
 logger = get_logger(__name__)
 
@@ -73,7 +73,7 @@ class BenefitCoverageRAGAgent:
 
         Raises:
             ConfigError: If agent cannot be initialized
-            RuntimeError: If agent module import fails
+            AgentError: If agent module import fails
 
         Side Effects:
             - Imports agent module
@@ -92,8 +92,9 @@ class BenefitCoverageRAGAgent:
 
         except ImportError as e:
             logger.error(f"Failed to import benefit coverage RAG agent: {e}")
-            raise RuntimeError(
-                f"Agent initialization failed: Cannot import agent module - {str(e)}"
+            raise AgentError(
+                f"Agent initialization failed: Cannot import agent module - {str(e)}",
+                details={"agent_type": "benefit_coverage_rag", "error_type": "ImportError"}
             )
 
         except ConfigError as e:
@@ -102,7 +103,10 @@ class BenefitCoverageRAGAgent:
 
         except Exception as e:
             logger.error(f"Unexpected error initializing agent: {str(e)}")
-            raise RuntimeError(f"Agent initialization failed: {str(e)}")
+            raise AgentError(
+                f"Agent initialization failed: {str(e)}",
+                details={"agent_type": "benefit_coverage_rag", "error_type": type(e).__name__}
+            )
 
     async def prepare_pipeline(
         self,
@@ -138,8 +142,8 @@ class BenefitCoverageRAGAgent:
             - index_name: str
 
         Raises:
-            ValueError: If required parameters not provided
-            RuntimeError: If agent execution fails
+            ValidationError: If required parameters not provided
+            AgentError: If agent execution fails
 
         Example:
             >>> agent = BenefitCoverageRAGAgent()
@@ -165,11 +169,17 @@ class BenefitCoverageRAGAgent:
         # Validate parameters
         if not s3_bucket:
             logger.error("Pipeline preparation attempted without s3_bucket")
-            raise ValueError("s3_bucket is required")
+            raise ValidationError(
+                "s3_bucket is required",
+                details={"operation": "rag_pipeline_preparation"}
+            )
 
         if not textract_prefix:
             logger.error("Pipeline preparation attempted without textract_prefix")
-            raise ValueError("textract_prefix is required")
+            raise ValidationError(
+                "textract_prefix is required",
+                details={"operation": "rag_pipeline_preparation"}
+            )
 
         # Build parameters
         params = {
@@ -195,7 +205,7 @@ class BenefitCoverageRAGAgent:
         # Ensure agent initialized
         try:
             self._ensure_initialized()
-        except (ConfigError, RuntimeError) as e:
+        except (ConfigError, AgentError) as e:
             logger.error(f"Agent initialization failed: {str(e)}")
             return {"success": False, "error": f"RAG service unavailable: {str(e)}"}
 
@@ -274,8 +284,8 @@ class BenefitCoverageRAGAgent:
             - retrieved_docs_count: int
 
         Raises:
-            ValueError: If question not provided
-            RuntimeError: If agent execution fails
+            ValidationError: If question not provided
+            AgentError: If agent execution fails
 
         Example:
             >>> agent = BenefitCoverageRAGAgent()
@@ -294,7 +304,10 @@ class BenefitCoverageRAGAgent:
         # Validate question
         if not question:
             logger.error("Query attempted without question")
-            raise ValueError("question is required")
+            raise ValidationError(
+                "question is required",
+                details={"operation": "rag_query"}
+            )
 
         # Build parameters
         params = {"question": question, "k": k}
@@ -314,7 +327,7 @@ class BenefitCoverageRAGAgent:
         # Ensure agent initialized
         try:
             self._ensure_initialized()
-        except (ConfigError, RuntimeError) as e:
+        except (ConfigError, AgentError) as e:
             logger.error(f"Agent initialization failed: {str(e)}")
             return {
                 "success": False,

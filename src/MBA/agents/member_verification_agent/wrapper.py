@@ -21,7 +21,7 @@ from typing import Dict, Any, Optional
 from datetime import date
 
 from ...core.logging_config import get_logger
-from ...core.exceptions import ConfigError, DatabaseError
+from ...core.exceptions import ConfigError, DatabaseError, AgentError, ValidationError
 
 logger = get_logger(__name__)
 
@@ -78,7 +78,7 @@ class MemberVerificationAgent:
 
         Raises:
             ConfigError: If agent cannot be initialized
-            RuntimeError: If agent module import fails
+            AgentError: If agent module import fails
 
         Side Effects:
             - Imports agent module
@@ -98,8 +98,9 @@ class MemberVerificationAgent:
 
         except ImportError as e:
             logger.error(f"Failed to import verification agent: {e}")
-            raise RuntimeError(
-                f"Agent initialization failed: Cannot import agent module - {str(e)}"
+            raise AgentError(
+                f"Agent initialization failed: Cannot import agent module - {str(e)}",
+                details={"agent_type": "member_verification", "error_type": "ImportError"}
             )
 
         except ConfigError as e:
@@ -108,7 +109,10 @@ class MemberVerificationAgent:
 
         except Exception as e:
             logger.error(f"Unexpected error initializing agent: {str(e)}")
-            raise RuntimeError(f"Agent initialization failed: {str(e)}")
+            raise AgentError(
+                f"Agent initialization failed: {str(e)}",
+                details={"agent_type": "member_verification", "error_type": type(e).__name__}
+            )
 
     def _build_verification_prompt(self, params: Dict[str, Any]) -> str:
         """
@@ -198,8 +202,8 @@ class MemberVerificationAgent:
             - Error: {"error": str}
             
         Raises:
-            ValueError: If no parameters provided
-            RuntimeError: If agent execution fails
+            ValidationError: If no parameters provided
+            AgentError: If agent execution fails
             
         Example:
             >>> agent = MemberVerificationAgent()
@@ -218,9 +222,9 @@ class MemberVerificationAgent:
         # Validate at least one parameter provided
         if not any([member_id, dob, name]):
             logger.error("Verification attempted with no parameters")
-            raise ValueError(
-                "At least one verification parameter required: "
-                "member_id, dob, or name"
+            raise ValidationError(
+                "At least one verification parameter required: member_id, dob, or name",
+                details={"provided_params": []}
             )
         
         # Build parameters dictionary
@@ -243,7 +247,7 @@ class MemberVerificationAgent:
         # Ensure agent initialized
         try:
             self._ensure_initialized()
-        except (ConfigError, RuntimeError) as e:
+        except (ConfigError, AgentError) as e:
             logger.error(f"Agent initialization failed: {str(e)}")
             return {"error": f"Verification service unavailable: {str(e)}"}
         
@@ -328,7 +332,7 @@ class MemberVerificationAgent:
                 result = await self.verify_member(**member_params)
                 results.append(result)
                 
-            except ValueError as e:
+            except ValidationError as e:
                 logger.warning(f"Invalid parameters for member {idx}: {str(e)}")
                 results.append({"error": f"Invalid parameters: {str(e)}"})
             
