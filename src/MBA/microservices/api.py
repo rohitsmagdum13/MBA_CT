@@ -57,6 +57,16 @@ app = FastAPI(
     version="0.2.0"
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Service instances (initialized on startup)
 s3_client: Optional[S3Client] = None
 file_processor: Optional[FileProcessor] = None
@@ -1037,6 +1047,8 @@ async def upload_pdf_and_prepare_rag(
 
         # Step 3: Upload to S3 (mba/pdf/ prefix)
         logger.info(f"\nSTEP 3: Uploading PDF to S3...")
+        # Note: s3_client already has 'mba/' as prefix, so s3_key will be relative to that
+        # Upload with 'pdf/' prefix, which becomes 'mba/pdf/' in S3
         s3_key = f"pdf/{file.filename}"
         s3_uri = s3_client.upload_file(
             temp_file,
@@ -1050,10 +1062,16 @@ async def upload_pdf_and_prepare_rag(
         logger.info(f"✅ Uploaded to: {s3_uri}")
 
         # Step 4: Construct expected Textract output prefix
-        # AWS Textract Lambda should output to: mba/textract-output/mba/pdf/{filename}/
+        # Since PDF is at 'mba/pdf/filename.pdf', Textract output should be at 'mba/textract-output/mba/pdf/filename.pdf/'
+        # But s3_client has prefix 'mba/', so we need to reference the full path from bucket root
         logger.info(f"\nSTEP 4: Determining Textract output location...")
-        textract_prefix = f"textract-output/{s3_key}/"
-        logger.info(f"📁 Expected Textract output: s3://{s3_client.bucket}/{textract_prefix}")
+
+        # The uploaded file is at: mba/pdf/{filename}
+        # Textract output should be at: mba/textract-output/mba/pdf/{filename}/
+        # We need to construct this path correctly
+        textract_prefix = f"textract-output/mba/pdf/{file.filename}/"
+
+        logger.info(f"📁 Expected Textract output: s3://{s3_client.bucket}/{s3_client.prefix}{textract_prefix}")
 
         # Step 5: Wait briefly for Textract processing (if synchronous)
         # NOTE: In production, Textract is usually async. You may need to poll or use SNS notifications.
@@ -1064,9 +1082,13 @@ async def upload_pdf_and_prepare_rag(
 
         # Step 6: Prepare RAG pipeline from Textract output
         logger.info(f"\nSTEP 6: Preparing RAG pipeline from Textract output...")
+        logger.info(f"   S3 Bucket: {s3_client.bucket}")
+        logger.info(f"   Textract Prefix: {textract_prefix}")
 
         index = index_name or "benefit_coverage_rag_index"
 
+        # Pass bucket and full textract prefix to RAG agent
+        # The RAG agent expects the full path from bucket root
         rag_result = await benefit_coverage_rag_agent.prepare_pipeline(
             s3_bucket=s3_client.bucket,
             textract_prefix=textract_prefix,
